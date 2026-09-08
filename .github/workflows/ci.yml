@@ -137,13 +137,13 @@ jobs:
           fi
 
       - name: Download Windows package
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: frzz-media-import-windows-x64
           path: release-assets
 
       - name: Download macOS package
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: frzz-media-import-macos-universal
           path: release-assets
