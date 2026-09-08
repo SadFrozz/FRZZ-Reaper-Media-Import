@@ -1,0 +1,26 @@
+[
+  {
+    "version": "5.1.6",
+    "url": "https://ffmpeg.org/releases/ffmpeg-5.1.6.tar.xz",
+    "archive_sha256": "f4fa066278f7a47feab316fef905f4db0d5e9b589451949740f83972b30901bd",
+    "generated_header": "libavutil/avconfig.h for Windows x64 little-endian"
+  },
+  {
+    "version": "6.1.2",
+    "url": "https://ffmpeg.org/releases/ffmpeg-6.1.2.tar.xz",
+    "archive_sha256": "3b624649725ecdc565c903ca6643d41f33bd49239922e45c9b1442c63dca4e38",
+    "generated_header": "libavutil/avconfig.h for Windows x64 little-endian"
+  },
+  {
+    "version": "7.1.1",
+    "url": "https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz",
+    "archive_sha256": "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1",
+    "generated_header": "libavutil/avconfig.h for Windows x64 little-endian"
+  },
+  {
+    "version": "8.1.2",
+    "url": "https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz",
+    "archive_sha256": "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c",
+    "generated_header": "libavutil/avconfig.h for Windows x64 little-endian"
+  }
+]

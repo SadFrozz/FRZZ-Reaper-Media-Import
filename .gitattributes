@@ -1,0 +1,19 @@
+* text=auto
+*.c text eol=lf
+*.cc text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.rc text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ac3 binary
+*.ddp binary
+*.dts binary
+*.eac3 binary
+*.ec3 binary
+*.mlp binary
+*.thd binary
+*.truehd binary
+*.wav binary
