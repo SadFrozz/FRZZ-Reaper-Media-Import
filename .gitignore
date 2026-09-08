@@ -1,0 +1,15 @@
+/build*/
+/stage*/
+/packages/
+/.vs/
+/bin/
+/dist/
+/evidence/
+/REPORT*.md
+/SHA256SUMS.txt
+*.zip
+*.tar.gz
+*.user
+*.rpp-bak
+*.RPP-bak
+*.reapeaks

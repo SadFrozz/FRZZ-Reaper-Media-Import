@@ -1,0 +1,25 @@
+#include <windows.h>
+1 VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DLL
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "FRZZ REAPER native media import"
+      VALUE "FileVersion", "1.0.0"
+      VALUE "ProductName", "FRZZ REAPER Media Import"
+      VALUE "ProductVersion", "1.0.0"
+      VALUE "OriginalFilename", "reaper_frzz_media_import.dll"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 1200
+  END
+END
