@@ -18,5 +18,6 @@ ThdAc3Decoder* create_thd_ff59(const char*,ModuleHandle,ModuleHandle,std::string
 ThdAc3Decoder* create_thd_ff60(const char*,ModuleHandle,ModuleHandle,std::string&);
 ThdAc3Decoder* create_thd_ff61(const char*,ModuleHandle,ModuleHandle,std::string&);
 ThdAc3Decoder* create_thd_ff62(const char*,ModuleHandle,ModuleHandle,std::string&);
+ThdAc3Decoder* create_thd_ff63(const char*,ModuleHandle,ModuleHandle,std::string&);
 std::unique_ptr<ThdAc3Decoder> create_thd_ac3_decoder(const char* path,std::string& error);
 }

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -33,28 +34,16 @@ struct Lifetime { PCM_source* source{}; unsigned long long id{}; bool armed=true
 struct Pending { std::weak_ptr<Lifetime> life; MediaItem* item{}; MediaItem_Take* take{}; std::string item_guid; };
 static std::mutex queue_mutex;
 static std::vector<Pending> pending;
-static bool live_project(ReaProject* project) {
-  for(int i=-1;;++i) {
-    auto candidate=EnumProjects(i,nullptr,0);
-    if(candidate==project)return true;
-    if(i>=0 && !candidate)return false;
-  }
-}
 class ImportUndo final {
-  ReaProject* project{};
-  bool open{};
+  ReaProject* project;
 public:
-  explicit ImportUndo(ReaProject* p):project(p),open(p!=nullptr) {
-    if(open) {Undo_BeginBlock2(project);log("subtitle outer undo opened project=%p",project);}
+  explicit ImportUndo(ReaProject* p):project(p) {
+    Undo_BeginBlock2(project);
+    log("subtitle undo opened project=%p",project);
   }
-  ~ImportUndo(){close();}
-  void close() noexcept {
-    if(!open)return;
-    open=false;
-    if(current_thread_id()==main_thread && live_project(project)) {
-      Undo_EndBlock2(project,"FRZZ: import subtitles",UNDO_STATE_ALL);
-      log("subtitle outer undo closed project=%p",project);
-    } else log("subtitle outer undo abandoned project=%p",project);
+  ~ImportUndo() {
+    Undo_EndBlock2(project,"FRZZ: import subtitles",UNDO_STATE_ITEMS|UNDO_STATE_MISCCFG);
+    log("subtitle undo closed project=%p",project);
   }
 };
 class SubtitleSource final : public PCM_source {
@@ -64,13 +53,12 @@ public:
   std::vector<Cue> cues;
   bool available=false;
   std::shared_ptr<Lifetime> life=std::make_shared<Lifetime>();
-  std::shared_ptr<ImportUndo> import_undo;
   std::set<int> logged_calls;
   std::mutex calls_mutex;
   SubtitleSource() {life->source=this; life->id=id; log("subtitle created id=%llu source=%p",id,this);}
   ~SubtitleSource() override {log("subtitle destroyed id=%llu source=%p",id,this);}
   PCM_source* Duplicate() override {
-    try { auto s=std::make_unique<SubtitleSource>(); s->file=file; s->cues=cues; s->available=available; s->life->armed=life->armed; s->import_undo=import_undo; log("subtitle Duplicate old=%llu new=%llu",id,s->id); return s.release(); } catch (...) {return nullptr;}
+    try { auto s=std::make_unique<SubtitleSource>(); s->file=file; s->cues=cues; s->available=available; s->life->armed=life->armed; log("subtitle Duplicate old=%llu new=%llu",id,s->id); return s.release(); } catch (...) {return nullptr;}
   }
   bool IsAvailable() override {return available;}
   void SetAvailable(bool v) override { available=v && !cues.empty(); }
@@ -91,7 +79,12 @@ public:
   int PeaksBuild_Begin() override {return 0;}
   int PeaksBuild_Run() override {return 0;}
   void PeaksBuild_Finish() override {}
-  void SaveState(ProjectStateContext* ctx) override {ctx->AddLine("FILE \"%s\"",file.c_str()); log("subtitle SaveState id=%llu flag=%d",id,ctx->GetTempFlag());}
+  void SaveState(ProjectStateContext* ctx) override {
+    State state;
+    state.AddLine("FILE %p~",file.c_str());
+    ctx->AddLine("%s",state.lines.front().c_str());
+    log("subtitle SaveState id=%llu flag=%d",id,ctx->GetTempFlag());
+  }
   int LoadState(const char*,ProjectStateContext* ctx) override {
     // Undo/project restore must never schedule a fresh destructive conversion.
     life->armed=false;
@@ -112,9 +105,15 @@ public:
         if(p1 && p2 && life->armed && current_thread_id()==main_thread) {
           char guid[128]{};
           if(!GetSetMediaItemInfo_String(static_cast<MediaItem*>(p1),"GUID",guid,false) || !guid[0]) {log("context lacks item GUID id=%llu",id);return 1;}
+          auto item=static_cast<MediaItem*>(p1);
+          auto take=static_cast<MediaItem_Take*>(p2);
           std::lock_guard<std::mutex> lock(queue_mutex);
-          const auto it=std::find_if(pending.begin(),pending.end(),[&](const Pending& p){auto l=p.life.lock(); return l && l->id==id && p.item==p1 && p.take==p2;});
-          if(it==pending.end()) {pending.push_back({life,static_cast<MediaItem*>(p1),static_cast<MediaItem_Take*>(p2),guid}); log("conversion queued id=%llu guid=%s",id,guid);}
+          const auto duplicate=std::find_if(pending.begin(),pending.end(),[&](const Pending& p){
+            return p.item==item && p.take==take && p.life.lock()==life;
+          });
+          if(duplicate!=pending.end())return 1;
+          pending.push_back({life,item,take,guid});
+          log("conversion queued id=%llu guid=%s",id,guid);
         }
         return 1;
       }
@@ -148,16 +147,25 @@ static std::string with_notes(MediaItem* item,const std::string& text) {
 static void process_pending() {
   std::vector<Pending> jobs;
   {std::lock_guard<std::mutex> lock(queue_mutex); jobs.swap(pending);}
+  // Keep all conversions for a project in one block, entirely within this main-thread callback.
+  std::map<ReaProject*,std::unique_ptr<ImportUndo>> undo_blocks;
   for(auto& p:jobs) {
     auto l=p.life.lock(); if(!l || !l->armed) continue;
-    auto import_undo=static_cast<SubtitleSource*>(l->source)->import_undo;
     auto proj=owning_project(p.item,p.take,l->source);
-    if(!proj) {log("conversion cancelled id=%llu invalid context",l->id);if(import_undo)import_undo->close();continue;}
+    if(!proj) {log("conversion cancelled id=%llu invalid context",l->id);continue;}
     char guid[128]{};
-    if(!GetSetMediaItemInfo_String(p.item,"GUID",guid,false) || p.item_guid!=guid) {log("conversion cancelled id=%llu changed item identity",l->id);if(import_undo)import_undo->close();continue;}
+    if(!GetSetMediaItemInfo_String(p.item,"GUID",guid,false) || p.item_guid!=guid) {
+      log("conversion cancelled id=%llu changed item identity",l->id);
+      continue;
+    }
     // Only a standalone, untrimmed placeholder is eligible for deletion.
-    if(CountTakes(p.item)!=1 || GetMediaItemTakeInfo_Value(p.take,"D_STARTOFFS")!=0 || GetMediaItemTakeInfo_Value(p.take,"D_PLAYRATE")!=1) {
-      l->armed=false; log("conversion refused id=%llu multi-take/section/rate",l->id);if(import_undo)import_undo->close();continue;
+    constexpr double length_tolerance=1e-7;
+    const auto item_length=GetMediaItemInfo_Value(p.item,"D_LENGTH");
+    if(CountTakes(p.item)!=1 || GetMediaItemTakeInfo_Value(p.take,"D_STARTOFFS")!=0 ||
+       GetMediaItemTakeInfo_Value(p.take,"D_PLAYRATE")!=1 || item_length+length_tolerance<l->source->GetLength()) {
+      l->armed=false;
+      log("conversion refused id=%llu multi-take/section/rate/trim",l->id);
+      continue;
     }
     auto track=GetMediaItemTrack(p.item);
     const double origin=GetMediaItemInfo_Value(p.item,"D_POSITION");
@@ -165,6 +173,8 @@ static void process_pending() {
     l->armed=false;
     std::vector<MediaItem*> created;
     created.reserve(cues.size());
+    auto& undo=undo_blocks[proj];
+    if(!undo)undo=std::make_unique<ImportUndo>(proj);
     {
       RefreshLock refresh;
       try {
@@ -188,14 +198,16 @@ static void process_pending() {
         log("conversion rollback id=%llu unknown error",l->id);
       }
     }
-    if(import_undo)import_undo->close();
     UpdateArrange();
   }
 }
 static PCM_source* create_video(const char* path) {
   std::unique_ptr<PCM_source> src(PCM_Source_CreateFromType("VIDEO"));
   if(!src) {log("VIDEO constructor failed path=%s",path); return nullptr;}
-  State state; state.lines={"VIDEO_DISABLED",std::string("FILE \"")+path+"\"",">"};
+  State state;
+  state.lines.emplace_back("VIDEO_DISABLED");
+  state.AddLine("FILE %p~",path);
+  state.lines.emplace_back(">");
   int result=src->LoadState("<SOURCE VIDEO",&state);
   log("VIDEO LoadState result=%d available=%d type=%s length=%.9f channels=%d samplerate=%.0f file=%s",result,src->IsAvailable(),src->GetType(),src->GetLength(),src->GetNumChannels(),src->GetSampleRate(),path);
   char info[4096]{};
@@ -209,7 +221,8 @@ static PCM_source* create_video(const char* path) {
   }
   return src.release();
 }
-class NativeVideoAdapter final : public ISimpleMediaDecoder {
+static constexpr char raw_audio_type[] = "FRZZ_AUDIO";
+class RawAudioDecoder final : public ISimpleMediaDecoder {
   std::string file;
   std::unique_ptr<PCM_source> native;
   std::unique_ptr<ThdAc3Decoder> thd_ac3;
@@ -217,7 +230,7 @@ class NativeVideoAdapter final : public ISimpleMediaDecoder {
   INT64 position=0;
 public:
   ISimpleMediaDecoder* Duplicate() override {
-    try {auto copy=new NativeVideoAdapter;copy->file=file;return copy;}catch(...){return nullptr;}
+    try {auto copy=new RawAudioDecoder;copy->file=file;return copy;}catch(...){return nullptr;}
   }
   void Open(const char* filename,int,int,int) override {
     native.reset();thd_ac3.reset();position=0;metadata={};
@@ -235,7 +248,7 @@ public:
         return;
       }
       bool scanned=scan_media(file.c_str(),metadata);
-      if(!scanned && metadata.error=="No loaded FFmpeg 5.x-8.x libraries available") {
+      if(!scanned && metadata.error==no_loaded_ffmpeg) {
         // Bootstrap REAPER's own library loader; do not search/load arbitrary DLL paths.
         native.reset(create_video(file.c_str()));
         scanned=native && scan_media(file.c_str(),metadata);
@@ -249,10 +262,10 @@ public:
   }
   void Close(bool) override {native.reset();thd_ac3.reset();position=0;}
   const char* GetFileName() override {return file.c_str();}
-  const char* GetType() override {return "FRZZ_VIDEO";}
+  const char* GetType() override {return raw_audio_type;}
   void GetInfoString(char* buf,int size,char* title,int title_size) override {
-    if(title && title_size>0)snprintf(title,title_size,"FRZZ native VIDEO audio");
-    if(buf && size>0)snprintf(buf,size,"%s\r\nDuration: %.9f s\r\nSample rate: %d Hz\r\nChannels: %d\r\nFFmpeg ABI: %d\r\n%s",thd_ac3?"Streaming THD+AC3 container handler":"Native VIDEO playback",metadata.duration,metadata.rate,metadata.channels,metadata.format_major,IsOpen()?"":"Media offline");
+    if(title && title_size>0)snprintf(title,title_size,"FRZZ Dolby/DTS audio");
+    if(buf && size>0)snprintf(buf,size,"%s\r\nDuration: %.9f s\r\nSample rate: %d Hz\r\nChannels: %d\r\nFFmpeg ABI: %d\r\n%s",thd_ac3?"Streaming THD+AC3 container handler":"Raw Dolby/DTS/MLP audio",metadata.duration,metadata.rate,metadata.channels,metadata.format_major,IsOpen()?"":"Media offline");
   }
   bool IsOpen() override {return thd_ac3 || (native && native->IsAvailable());}
   int GetNumChannels() override {return metadata.channels;}
@@ -270,17 +283,19 @@ public:
     const int read=std::clamp(block.samples_out,0,count);position+=read;return read;
   }
 };
-static PCM_source* create_corrected_video(const char* path) {
+static PCM_source* create_raw_audio(const char* path) {
   // REAPER owns the generated PCM_source, buffering, peak-building and state handling.
-  auto src=std::unique_ptr<PCM_source>(PCM_Source_CreateFromSimple(new NativeVideoAdapter,path));
+  auto src=std::unique_ptr<PCM_source>(PCM_Source_CreateFromSimple(new RawAudioDecoder,path));
   if(!src || !src->IsAvailable())return nullptr;
   return src.release();
 }
 static PCM_source* create_type(const char* type,int priority) {
-  if(priority==0 && !strcmp(type,"FRZZ_VIDEO")) {
-    try{return PCM_Source_CreateFromSimple(new NativeVideoAdapter,nullptr);}catch(...){return nullptr;}
+  if(priority!=0) return nullptr;
+  // Accept the original project source identifier while reporting the audio type.
+  if(!strcmp(type,raw_audio_type) || !strcmp(type,"FRZZ_VIDEO")) {
+    try{return PCM_Source_CreateFromSimple(new RawAudioDecoder,nullptr);}catch(...){return nullptr;}
   }
-  if(strcmp(type,"FRZZ_SUBTITLE") || priority!=0) return nullptr;
+  if(strcmp(type,"FRZZ_SUBTITLE")) return nullptr;
   try{return new SubtitleSource;}catch(...){return nullptr;}
 }
 static PCM_source* create_file(const char* path,int priority) {
@@ -289,10 +304,9 @@ static PCM_source* create_file(const char* path,int priority) {
   log("CreateFromFile priority=%d path=%s",priority,path);
   if(priority!=0) return nullptr;
   try {
-    if(format==Format::raw_video) return create_corrected_video(path);
+    if(format==Format::raw_audio) return create_raw_audio(path);
     auto src=std::make_unique<SubtitleSource>();
     if(!src->SetFileName(path)) return nullptr;
-    src->import_undo=std::make_shared<ImportUndo>(EnumProjects(-1,nullptr,0));
     return src.release();
   } catch(const std::exception& e) {log("CreateFromFile error=%s",e.what());} catch(...) {log("CreateFromFile unknown error");}
   return nullptr;
@@ -301,7 +315,7 @@ static const char* extensions(int i,const char** desc) {
   if(desc) *desc=nullptr;
   if(i<0 || static_cast<size_t>(i)>=extensions_list.size())return nullptr;
   const auto& e=extensions_list[static_cast<size_t>(i)];
-  if(desc)*desc=e.format==Format::raw_video?"FRZZ Dolby/DTS audio":"FRZZ subtitles (ASS/SSA/SRT)";
+  if(desc)*desc=e.format==Format::raw_audio?"FRZZ Dolby/DTS audio":"FRZZ subtitles (ASS/SSA/SRT)";
   return e.name;
 }
 static pcmsrc_register_t registry{create_type,create_file,extensions};
@@ -328,7 +342,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_H
 #ifdef FRZZ_ENABLE_LOGGING
     log_file.open(std::filesystem::u8path(GetResourcePath())/"frzz_media_import.log",std::ios::app);
 #endif
-    log("plugin loaded host=%s plugin=1.0.0 extensions=25 target=REAPER7.66+FFmpeg5+",GetAppVersion());
+    log("plugin loaded host=%s plugin=1.1.0 extensions=25 target=REAPER7.66+FFmpeg5+",GetAppVersion());
     reg=rec->Register;
     if(!reg("pcmsrc",&registry)) return 0;
     if(!reg("timer",reinterpret_cast<void*>(timer))) {reg("-pcmsrc",&registry);return 0;}

@@ -20,7 +20,6 @@
 #define REAPERAPI_WANT_SetItemStateChunk
 #define REAPERAPI_WANT_Undo_BeginBlock2
 #define REAPERAPI_WANT_Undo_EndBlock2
-#define REAPERAPI_WANT_Undo_CanUndo2
 #define REAPERAPI_WANT_PreventUIRefresh
 #define REAPERAPI_WANT_UpdateArrange
 #define REAPERAPI_WANT_SelectAllMediaItems

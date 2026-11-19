@@ -2,6 +2,28 @@
 
 [Русский](#русский) · [English](#english)
 
+## v1.1.0 — 2026-11-19
+
+### Русский
+
+- Добавлена поддержка shared-библиотек FFmpeg 9.x в REAPER 7.80 и новее.
+- Dolby, DTS и MLP импортируются как аудиоисточники. Проекты с источниками FRZZ_VIDEO открываются и при сохранении переходят на FRZZ_AUDIO.
+- Субтитры с одинаковым началом и концом сохраняют нулевую длительность. SRT сохраняет абзацы и не принимает таймкод внутри реплики за начало нового айтема.
+- ASS/SSA учитывает секцию [Events], пробелы вокруг таймкодов и оформление реплик при преобразовании в обычный текст.
+- Исправлены чтение и перемотка TrueHD+AC3, включая сочетания с разными частотами и усечение открытого файла на macOS.
+- Предпросмотр субтитров не меняет историю Undo. Временный айтем с правым тримом сохраняет свои границы.
+- Исправлено открытие и сохранение путей с двойными кавычками на macOS.
+
+### English
+
+- Added support for shared versions of FFmpeg 9.x in REAPER 7.80 and later.
+- Dolby, DTS and MLP import as audio sources. Projects with FRZZ_VIDEO sources load and save those sources as FRZZ_AUDIO.
+- Zero-duration subtitle cues retain their timing. SRT preserves paragraphs and keeps timestamp examples inside the cue text.
+- ASS/SSA scope dialogue to [Events], accept whitespace around timestamps, and turn subtitle formatting and drawing commands into plain notes.
+- Fixed TrueHD+AC3 reading and seeking with mixed sample rates and when an open file is truncated on macOS.
+- Subtitle preview leaves undo history alone. Right-trimmed placeholders retain their bounds.
+- Fixed opening and saving paths containing double quotes on macOS.
+
 ## v1.0.0 — 2026-09-08
 
 ### Русский

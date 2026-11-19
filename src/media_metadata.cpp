@@ -1,5 +1,6 @@
 #include "media_metadata.h"
 #include "support.h"
+#include <array>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -45,13 +46,16 @@ bool scan_media(const char* path,MediaMetadata& metadata) {
     metadata=found->second;log("metadata cache hit file=%s duration=%.9f",path,metadata.duration);return true;
   }
   using Scanner=bool(*)(const char*,ModuleHandle,ModuleHandle,MediaMetadata&);
-  for(int major=62;major>=59;--major) {
+  struct Version { int major; Scanner scan; };
+  static constexpr std::array<Version,5> versions{{
+    {63,scan_ff63},{62,scan_ff62},{61,scan_ff61},{60,scan_ff60},{59,scan_ff59}
+  }};
+  for(const auto& [major, scan]:versions) {
     ModuleHandle format=retain_loaded_module("avformat",major),codec{};
     if(!format)continue;
     codec=retain_loaded_module("avcodec",major);
     if(!codec){release_module(format);continue;}
     struct Modules {ModuleHandle f,c;~Modules(){release_module(c);release_module(f);}} modules{format,codec};
-    const Scanner scan=major==62?scan_ff62:major==61?scan_ff61:major==60?scan_ff60:scan_ff59;
     const auto begin=monotonic_ms();
     const bool ok=scan(path,format,codec,metadata);
     log("metadata scan ok=%d ABI=%d duration=%.9f frames=%lld packets=%lld rate=%d channels=%d elapsed_ms=%llu error=%s file=%s",ok,major,metadata.duration,metadata.frames,metadata.packets,metadata.rate,metadata.channels,static_cast<unsigned long long>(monotonic_ms()-begin),metadata.error.c_str(),path);
@@ -59,6 +63,6 @@ bool scan_media(const char* path,MediaMetadata& metadata) {
     if(ok)metadata.error="Source changed during metadata scan";
     return false;
   }
-  metadata.error="No loaded FFmpeg 5.x-8.x libraries available";return false;
+  metadata.error=no_loaded_ffmpeg;return false;
 }
 }

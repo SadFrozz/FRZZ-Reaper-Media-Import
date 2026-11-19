@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FRZZReaperMediaImport VERSION 1.0.0 LANGUAGES CXX)
+project(FRZZReaperMediaImport VERSION 1.1.0 LANGUAGES CXX)
 
 if(WIN32)
   if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -26,10 +26,11 @@ if(MSVC)
   target_compile_definitions(frzz_wdl PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 endif()
 
-set(FFMPEG_HEADER_VERSIONS 5.1.6 6.1.2 7.1.1 8.1.2)
+set(FFMPEG_HEADER_VERSIONS 5.1.6 6.1.2 7.1.1 8.1.2 9.0.2)
 set(FFMPEG_MAJOR 59)
 foreach(HEADER_VERSION IN LISTS FFMPEG_HEADER_VERSIONS)
   add_library(frzz_ff${FFMPEG_MAJOR} OBJECT src/ffmpeg_scan.cpp src/thd_ac3_decoder.cpp)
+  list(APPEND FRZZ_FFMPEG_ADAPTERS frzz_ff${FFMPEG_MAJOR})
   target_include_directories(frzz_ff${FFMPEG_MAJOR} SYSTEM PRIVATE external/ffmpeg-headers/${HEADER_VERSION})
   target_compile_definitions(frzz_ff${FFMPEG_MAJOR} PRIVATE
     FRZZ_FFMPEG_SCAN=scan_ff${FFMPEG_MAJOR}
@@ -54,7 +55,7 @@ endif()
 
 add_library(reaper_frzz_media_import SHARED ${FRZZ_PLUGIN_SOURCES})
 target_link_libraries(reaper_frzz_media_import PRIVATE
-  frzz_ff59 frzz_ff60 frzz_ff61 frzz_ff62 frzz_wdl)
+  ${FRZZ_FFMPEG_ADAPTERS} frzz_wdl)
 target_include_directories(reaper_frzz_media_import SYSTEM PRIVATE
   external/reaper-sdk/sdk
   external/WDL/WDL)

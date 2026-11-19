@@ -2,17 +2,17 @@
 #include <array>
 #include <string_view>
 namespace frzz {
-enum class Format { unsupported, raw_video, ass, ssa, srt };
+enum class Format { unsupported, raw_audio, ass, ssa, srt };
 struct Extension { const char* name; Format format; };
 inline constexpr std::array<Extension,25> extensions_list{{
-  {"ac3",Format::raw_video},{"eac3",Format::raw_video},{"ec3",Format::raw_video},
-  {"ddp",Format::raw_video},{"ac4",Format::raw_video},{"thd",Format::raw_video},
-  {"truehd",Format::raw_video},{"thd+ac3",Format::raw_video},{"mlp",Format::raw_video},
-  {"dts",Format::raw_video},{"dtshd",Format::raw_video},{"dts-hd",Format::raw_video},
-  {"dtsma",Format::raw_video},{"dts-ma",Format::raw_video},{"dts-hdma",Format::raw_video},
-  {"dts-hd-ma",Format::raw_video},{"dtses",Format::raw_video},{"dts-es",Format::raw_video},
-  {"dtsx",Format::raw_video},{"dts-x",Format::raw_video},{"dtsuhd",Format::raw_video},
-  {"dts-uhd",Format::raw_video},{"ass",Format::ass},{"ssa",Format::ssa},{"srt",Format::srt}
+  {"ac3",Format::raw_audio},{"eac3",Format::raw_audio},{"ec3",Format::raw_audio},
+  {"ddp",Format::raw_audio},{"ac4",Format::raw_audio},{"thd",Format::raw_audio},
+  {"truehd",Format::raw_audio},{"thd+ac3",Format::raw_audio},{"mlp",Format::raw_audio},
+  {"dts",Format::raw_audio},{"dtshd",Format::raw_audio},{"dts-hd",Format::raw_audio},
+  {"dtsma",Format::raw_audio},{"dts-ma",Format::raw_audio},{"dts-hdma",Format::raw_audio},
+  {"dts-hd-ma",Format::raw_audio},{"dtses",Format::raw_audio},{"dts-es",Format::raw_audio},
+  {"dtsx",Format::raw_audio},{"dts-x",Format::raw_audio},{"dtsuhd",Format::raw_audio},
+  {"dts-uhd",Format::raw_audio},{"ass",Format::ass},{"ssa",Format::ssa},{"srt",Format::srt}
 }};
 inline Format identify_format(std::string_view path) {
   const auto dot=path.rfind('.');

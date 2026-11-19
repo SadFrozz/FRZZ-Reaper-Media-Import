@@ -2,9 +2,10 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
+#include <charconv>
+#include <optional>
+#include <string_view>
 #include <stdexcept>
-#include <regex>
 
 namespace frzz {
 std::string read_utf8(const char* path) {
@@ -17,14 +18,6 @@ std::string read_utf8(const char* path) {
   std::string data(static_cast<size_t>(size),'\0');
   if(!data.empty() && !f.read(data.data(),size)) throw std::runtime_error("Cannot read subtitle file");
   return data;
-}
-static std::string trim(std::string s) {
-  const auto first=s.find_first_not_of(" \t");
-  return first==std::string::npos ? "" : s.substr(first,s.find_last_not_of(" \t")-first+1);
-}
-static std::string lower(std::string s) {
-  for(char& c:s)if(c>='A' && c<='Z')c+=('a'-'A');
-  return s;
 }
 static bool valid_utf8(const std::string& data) {
   for(size_t i=0;i<data.size();) {
@@ -42,105 +35,293 @@ static bool valid_utf8(const std::string& data) {
   }
   return true;
 }
-static std::vector<std::string> lines_of(std::string data) {
+static bool whitespace(char c) {
+  return c==' ' || c=='\t';
+}
+static std::string_view trim_left(std::string_view text) {
+  while(!text.empty() && whitespace(text.front()))text.remove_prefix(1);
+  return text;
+}
+static std::string_view trim(std::string_view text) {
+  text=trim_left(text);
+  while(!text.empty() && whitespace(text.back()))text.remove_suffix(1);
+  return text;
+}
+static char ascii_lower(char c) {
+  return c>='A' && c<='Z' ? static_cast<char>(c+('a'-'A')) : c;
+}
+static bool starts_with(std::string_view text,std::string_view prefix) {
+  return text.substr(0,prefix.size())==prefix;
+}
+static bool equal_ascii_case(std::string_view text,std::string_view expected) {
+  return text.size()==expected.size() &&
+    std::equal(text.begin(),text.end(),expected.begin(),[](char a,char b){return ascii_lower(a)==b;});
+}
+static std::vector<std::string_view> lines_of(const std::string& data) {
   if(data.find('\0')!=std::string::npos || !valid_utf8(data))
     throw std::runtime_error("Expected UTF-8 subtitles");
-  if(data.compare(0,3,"\xef\xbb\xbf")==0)data.erase(0,3);
-  std::istringstream input(data);std::string line;std::vector<std::string> lines;
-  while(std::getline(input,line)) {
-    if(!line.empty() && line.back()=='\r')line.pop_back();
-    lines.push_back(std::move(line));
+  std::string_view input=data;
+  if(starts_with(input,"\xef\xbb\xbf"))input.remove_prefix(3);
+  std::vector<std::string_view> lines;
+  while(!input.empty()) {
+    const auto end=input.find_first_of("\r\n");
+    lines.push_back(input.substr(0,end));
+    if(end==std::string_view::npos)break;
+    const auto separator=input[end]=='\r' && end+1<input.size() && input[end+1]=='\n' ? 2 : 1;
+    input.remove_prefix(end+separator);
   }
   return lines;
 }
-static std::string remove_tags(std::string text) {
-  for(size_t at=0;(at=text.find('{',at))!=std::string::npos;) {
-    const auto end=text.find('}',at+1);if(end==std::string::npos)break;
-    text.erase(at,end-at+1);
+static bool digit(char c) {return c>='0' && c<='9';}
+
+static bool consume(std::string_view& text,char expected) {
+  if(text.empty() || text.front()!=expected)return false;
+  text.remove_prefix(1);
+  return true;
+}
+static bool read_number(std::string_view& text,int& number,size_t max_digits) {
+  if(text.empty() || !digit(text.front()))return false;
+  auto end=text.begin()+1;
+  while(end!=text.end() && digit(*end))++end;
+  const auto count=static_cast<size_t>(end-text.begin());
+  if(count>max_digits || std::from_chars(text.data(),text.data()+count,number).ec!=std::errc{})return false;
+  text.remove_prefix(count);
+  return true;
+}
+static std::optional<double> read_time(std::string_view& text,char decimal) {
+  int hours,minutes,seconds;
+  if(!read_number(text,hours,10) || !consume(text,':') ||
+     !read_number(text,minutes,2) || !consume(text,':') ||
+     !read_number(text,seconds,2) || minutes>59 || seconds>59)
+    return {};
+  if(!consume(text,decimal) && !(decimal==',' && consume(text,'.')))return {};
+  if(text.empty() || !digit(text.front()))return {};
+  int millis=0, place=100;
+  while(!text.empty() && digit(text.front())) {
+    millis+=(text.front()-'0')*place;
+    place/=10;
+    text.remove_prefix(1);
   }
-  return text;
+  return hours*3600.0+minutes*60.0+seconds+millis/1000.0;
 }
-static void hard_breaks(std::string& text) {
-  for(size_t at=0;(at=text.find("\\N",at))!=std::string::npos;++at)text.replace(at,2,"\n");
+static double ass_time(std::string_view field) {
+  field=trim(field);
+  const auto value=read_time(field,'.');
+  if(!value || !field.empty())throw std::runtime_error("Invalid ASS/SSA timestamp");
+  return *value;
 }
-static double ass_time(const std::string& value) {
-  static const std::regex pattern(R"(^\s*([0-9]+):([0-9]{2}):([0-9]{2})\.([0-9]{2})$)");
-  std::smatch m;
-  if(!std::regex_match(value,m,pattern))throw std::runtime_error("Invalid ASS/SSA timestamp");
-  const int hours=std::stoi(m[1]),minutes=std::stoi(m[2]),seconds=std::stoi(m[3]),fraction=std::stoi(m[4]);
-  if(minutes>59 || seconds>59)throw std::runtime_error("Invalid ASS/SSA timestamp range");
-  return hours*3600.0+minutes*60.0+seconds+fraction/100.0;
+
+static void append_ass_text(std::string& out,std::string_view text,bool hard_soft_breaks) {
+  for(size_t i=0;i<text.size();++i) {
+    if(text[i]=='\\' && i+1<text.size()) {
+      const char escape=text[i+1];
+      if(escape=='N' || escape=='n') {
+        out+=escape=='N' || hard_soft_breaks ? '\n' : ' ';
+        ++i;
+        continue;
+      }
+      if(escape=='h') {
+        out+="\xc2\xa0";
+        ++i;
+        continue;
+      }
+    }
+    out+=text[i];
+  }
 }
-static std::vector<std::string> split_format(const std::string& s) {
-  std::vector<std::string> result;std::istringstream input(s);std::string field;
-  while(std::getline(input,field,','))result.push_back(lower(trim(field)));
+static void ass_overrides(std::string_view tags,bool& drawing,bool& hard_soft_breaks,bool default_hard_breaks) {
+  int depth=0;
+  for(size_t i=0;i+1<tags.size();++i) {
+    if(tags[i]=='(')++depth;
+    if(tags[i]==')' && depth)--depth;
+    if(depth || tags[i]!='\\')continue;
+    const char name=tags[i+1];
+    if(name!='p' && name!='q')continue;
+    auto value=tags.substr(i+2);
+    // Longer names such as pos and pbo do not change drawing mode.
+    if(!value.empty() && ascii_lower(value.front())>='a' && ascii_lower(value.front())<='z')continue;
+    value=trim_left(value);
+    if(consume(value,'('))value=trim_left(value);
+    const bool negative=consume(value,'-');
+    if(!negative)consume(value,'+');
+    int number=0;
+    const bool has_number=read_number(value,number,10);
+    if(name=='p')drawing=has_number && !negative && number>0;
+    if(name=='q')hard_soft_breaks=has_number ? !negative && number==2 : default_hard_breaks;
+  }
+}
+static std::string ass_plain_text(std::string_view text,bool default_hard_breaks) {
+  std::string result;
+  bool drawing=false, hard_soft_breaks=default_hard_breaks;
+  while(!text.empty()) {
+    const auto open=text.find('{');
+    const auto close=open==std::string_view::npos ? open : text.find('}',open+1);
+    if(close==std::string_view::npos) {
+      if(!drawing)append_ass_text(result,text,hard_soft_breaks);
+      break;
+    }
+    if(!drawing)append_ass_text(result,text.substr(0,open),hard_soft_breaks);
+    ass_overrides(text.substr(open+1,close-open-1),drawing,hard_soft_breaks,default_hard_breaks);
+    text.remove_prefix(close+1);
+  }
   return result;
 }
+
+struct EventColumns {
+  size_t count=10;
+  size_t start=1, end=2, text=9;
+  size_t actor=4;
+};
+static EventColumns event_columns(std::string_view format) {
+  std::vector<std::string_view> fields;
+  for(;;) {
+    const auto comma=format.find(',');
+    fields.push_back(trim(format.substr(0,comma)));
+    if(comma==std::string_view::npos)break;
+    format.remove_prefix(comma+1);
+  }
+  auto index=[&](std::string_view name) {
+    return static_cast<size_t>(std::find_if(fields.begin(),fields.end(),
+      [&](std::string_view field){return equal_ascii_case(field,name);})-fields.begin());
+  };
+  EventColumns columns{fields.size(),index("start"),index("end"),index("text"),index("actor")};
+  if(columns.actor==columns.count)columns.actor=index("name");
+  if(columns.start==columns.count || columns.end==columns.count || columns.text==columns.count)
+    throw std::runtime_error("Events Format must contain Start, End and Text");
+  return columns;
+}
 // Split non-text columns from both ends, preserving commas in the Text column.
-static std::vector<std::string> split_event(const std::string& s,size_t count,size_t text_index) {
-  std::vector<std::string> out(count);size_t left=0,right=s.size();
-  for(size_t i=0;i<text_index;++i) {
-    auto comma=s.find(',',left);if(comma==std::string::npos)throw std::runtime_error("Incomplete ASS/SSA Dialogue");
-    out[i]=s.substr(left,comma-left);left=comma+1;
+static std::vector<std::string_view> split_event(std::string_view row,const EventColumns& columns) {
+  std::vector<std::string_view> fields(columns.count);
+  for(size_t i=0;i<columns.text;++i) {
+    const auto comma=row.find(',');
+    if(comma==std::string_view::npos)throw std::runtime_error("Incomplete ASS/SSA Dialogue");
+    fields[i]=row.substr(0,comma);
+    row.remove_prefix(comma+1);
   }
-  for(size_t i=count-1;i>text_index;--i) {
-    if(right==0)throw std::runtime_error("Incomplete ASS/SSA Dialogue");
-    auto comma=s.rfind(',',right-1);
-    if(comma==std::string::npos || comma<left)throw std::runtime_error("Incomplete ASS/SSA Dialogue");
-    out[i]=s.substr(comma+1,right-comma-1);right=comma;
+  for(size_t i=columns.count-1;i>columns.text;--i) {
+    const auto comma=row.rfind(',');
+    if(comma==std::string_view::npos)throw std::runtime_error("Incomplete ASS/SSA Dialogue");
+    fields[i]=row.substr(comma+1);
+    row=row.substr(0,comma);
   }
-  out[text_index]=s.substr(left,right-left);return out;
+  fields[columns.text]=row;
+  return fields;
 }
 std::vector<Cue> parse_ass(const std::string& contents) {
-  const auto lines=lines_of(contents);
-  std::vector<std::string> format={"layer","start","end","style","name","marginl","marginr","marginv","effect","text"};
-  bool in_events=false;
+  EventColumns columns;
+  // Accept standalone event fragments before any explicit section.
+  bool in_events=true, in_script_info=false, hard_soft_breaks=false;
   std::vector<Cue> result;
-  for(const auto& line:lines) {
-    const auto structural=lower(trim(line));
-    if(!structural.empty() && structural.front()=='[')in_events=structural=="[events]";
-    if(in_events && structural.compare(0,7,"format:")==0) {
-      format=split_format(trim(line).substr(7));continue;
+  for(auto line:lines_of(contents)) {
+    const auto structural=trim(line);
+    if(!structural.empty() && structural.front()=='[' && structural.back()==']') {
+      in_events=equal_ascii_case(structural,"[events]");
+      in_script_info=equal_ascii_case(structural,"[script info]");
+      continue;
     }
-    if(line.compare(0,9,"Dialogue:")!=0)continue;
-    auto index=[&](const char* name)->int {auto it=std::find(format.begin(),format.end(),name);return it==format.end()?-1:static_cast<int>(it-format.begin());};
-    const int start=index("start"),end=index("end"),text_index=index("text");
-    int actor=index("actor");if(actor<0)actor=index("name");
-    if(start<0 || end<0 || text_index<0)throw std::runtime_error("Events Format must contain Start, End and Text");
-    auto fields=split_event(line.substr(9),format.size(),static_cast<size_t>(text_index));
-    Cue cue{ass_time(fields[start]),ass_time(fields[end]),remove_tags(fields[text_index])};
-    if(cue.end<=cue.start)throw std::runtime_error("Subtitle cue end must follow start");
-    if(actor>=0 && !fields[actor].empty())cue.text="["+fields[actor]+"] "+cue.text;
-    hard_breaks(cue.text);result.push_back(std::move(cue));
+    line=trim_left(line);
+    if(in_script_info && equal_ascii_case(line.substr(0,10),"wrapstyle:"))
+      hard_soft_breaks=trim(line.substr(10))=="2";
+    if(!in_events)continue;
+    if(equal_ascii_case(line.substr(0,7),"format:")) {
+      columns=event_columns(line.substr(7));
+      continue;
+    }
+    if(!equal_ascii_case(line.substr(0,9),"dialogue:"))continue;
+    const auto fields=split_event(line.substr(9),columns);
+    Cue cue{ass_time(fields[columns.start]),ass_time(fields[columns.end]),{}};
+    // Instantaneous events are valid and retain their exact timing.
+    if(cue.end<cue.start)throw std::runtime_error("ASS/SSA cue end cannot precede start");
+    if(columns.actor<fields.size() && !fields[columns.actor].empty()) {
+      cue.text="["+std::string(fields[columns.actor])+"] ";
+      // Preserve the Actor field as metadata, including literal soft escapes.
+      for(size_t at=0;(at=cue.text.find("\\N",at))!=std::string::npos;++at)
+        cue.text.replace(at,2,"\n");
+    }
+    cue.text+=ass_plain_text(fields[columns.text],hard_soft_breaks);
+    result.push_back(std::move(cue));
   }
   if(result.empty())throw std::runtime_error("No ASS/SSA Dialogue events");
   return result;
 }
-std::vector<Cue> parse_srt(const std::string& contents) {
-  const auto lines=lines_of(contents);std::vector<Cue> result;
-  // Keep the v1.3 timestamp spelling and 10-following-line limit.
-  static const std::regex pattern(R"(([0-9]{2}):([0-9]{2}):([0-9]{2}),([0-9]{3}) --> ([0-9]{2}):([0-9]{2}):([0-9]{2}),([0-9]{3}))");
-  for(size_t i=0;i<lines.size();++i) {
-    if(lines[i].find("-->")==std::string::npos)continue;
-    std::smatch match;if(!std::regex_search(lines[i],match,pattern))continue;
-    auto timestamp=[&](size_t first) {
-      const int h=std::stoi(match[first]),m=std::stoi(match[first+1]),s=std::stoi(match[first+2]),ms=std::stoi(match[first+3]);
-      if(m>59 || s>59)throw std::runtime_error("Invalid SRT timestamp range");
-      return h*3600.0+m*60.0+s+ms/1000.0;
-    };
-    Cue cue{timestamp(1),timestamp(5),{}};
-    if(cue.end<=cue.start)throw std::runtime_error("Subtitle cue end must follow start");
-    for(size_t n=1;n<=10 && i+n<lines.size();++n) {
-      if(lines[i+n].empty())break;
-      if(n>1)cue.text+='\n';
-      cue.text+=remove_tags(lines[i+n]);
+
+static bool srt_index(std::string_view line) {
+  return !line.empty() && std::all_of(line.begin(),line.end(),digit);
+}
+static std::optional<Cue> srt_timing(std::string_view line) {
+  const auto start=read_time(line,',');
+  line=trim_left(line);
+  if(!start || !starts_with(line,"-->"))return {};
+  line=trim_left(line.substr(3));
+  const auto end=read_time(line,',');
+  // SubRip also allows position metadata after the end time.
+  if(!end || (!line.empty() && !whitespace(line.front())))return {};
+  return Cue{*start,*end,{}};
+}
+static bool srt_style_tag(std::string_view tag) {
+  consume(tag,'/');
+  const auto name=tag.substr(0,tag.find_first_of(" \t"));
+  return equal_ascii_case(name,"b") || equal_ascii_case(name,"i") ||
+    equal_ascii_case(name,"u") || equal_ascii_case(name,"s") || equal_ascii_case(name,"font");
+}
+static void append_srt_text(std::string& out,std::string_view line) {
+  // Keep the existing override and hard-break handling for plain REAPER notes.
+  const auto last_brace=line.rfind('}');
+  for(size_t i=0;i<line.size();++i) {
+    if(line[i]=='{' && last_brace!=std::string_view::npos && i<last_brace) {
+      i=line.find('}',i+1);
+      continue;
     }
-    // His'key v1.3 applies this in its common item loop, including SRT.
-    hard_breaks(cue.text);result.push_back(std::move(cue));
+    if(line[i]=='<') {
+      const auto end=line.find_first_of("<>",i+1);
+      if(end!=std::string_view::npos && line[end]=='>' && srt_style_tag(line.substr(i+1,end-i-1))) {
+        i=end;
+        continue;
+      }
+    }
+    if(line[i]=='\\' && i+1<line.size() && line[i+1]=='N') {
+      out+='\n';
+      ++i;
+    } else out+=line[i];
+  }
+}
+std::vector<Cue> parse_srt(const std::string& contents) {
+  const auto lines=lines_of(contents);
+  std::vector<Cue> result;
+  size_t at=0;
+  while(at<lines.size() && trim(lines[at]).empty())++at;
+  while(at<lines.size()) {
+    if(srt_index(trim(lines[at])))++at;
+    auto cue=at<lines.size()?srt_timing(trim(lines[at])):std::nullopt;
+    if(!cue)throw std::runtime_error("Expected SRT timing at line "+std::to_string(at+1));
+    if(cue->end<cue->start)throw std::runtime_error("SRT cue end cannot precede start");
+
+    const auto body=++at;
+    auto last=body;
+    bool blank=false;
+    for(;at<lines.size();++at) {
+      const auto line=trim(lines[at]);
+      if(line.empty()) {
+        blank=true;
+        continue;
+      }
+      // An empty line separates cues only when the next content is a header.
+      if(blank && (srt_index(line) || srt_timing(line)))break;
+      last=at+1;
+      blank=false;
+    }
+    // Keep the documented 10-line display limit while reading the whole cue.
+    for(auto i=body;i<std::min(last,body+10);++i) {
+      if(i!=body)cue->text+='\n';
+      if(!trim(lines[i]).empty())append_srt_text(cue->text,lines[i]);
+    }
+    result.push_back(std::move(*cue));
   }
   if(result.empty())throw std::runtime_error("No SRT cues");
   return result;
 }
+
 std::vector<Cue> parse_subtitles(const std::string& contents,Format format) {
   if(format==Format::srt)return parse_srt(contents);
   if(format==Format::ass || format==Format::ssa)return parse_ass(contents);

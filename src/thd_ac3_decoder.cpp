@@ -1,6 +1,7 @@
 #include "thd_ac3.h"
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -11,7 +12,6 @@
 #include <vector>
 #ifndef _WIN32
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -27,11 +27,11 @@ struct SyncPoint {std::uint64_t unit{},offset{};};
 struct Index {
 #ifdef _WIN32
   HANDLE file=INVALID_HANDLE_VALUE,mapping{};
+  const unsigned char* data{};
 #else
   int file=-1;
 #endif
-  const unsigned char* data{};
-  std::uint64_t size{},units{},ac3_frames{};
+  std::uint64_t size{},units{};
   int rate{},samples_per_unit{};
   std::string identity;
   std::vector<Segment> segments;
@@ -40,10 +40,46 @@ struct Index {
 #ifdef _WIN32
     if(data)UnmapViewOfFile(data);if(mapping)CloseHandle(mapping);if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
 #else
-    if(data)munmap(const_cast<unsigned char*>(data),static_cast<std::size_t>(size));if(file>=0)close(file);
+    if(file>=0)close(file);
 #endif
   }
 };
+class ReadWindow {
+#ifndef _WIN32
+  // Both the index scan and each decoder keep their own sequential read buffer.
+  // Positioned reads report truncation as a short read instead of faulting on a mapped page.
+  std::vector<unsigned char> buffer;
+  std::uint64_t start{};
+  std::size_t filled{};
+#endif
+public:
+  bool read(const Index& index, std::uint64_t offset, void* destination, std::size_t count) {
+    if(offset>index.size || count>index.size-offset)return false;
+#ifdef _WIN32
+    std::memcpy(destination,index.data+offset,count);
+#else
+    if(offset<start || offset-start>filled || count>filled-(offset-start)) {
+      if(buffer.empty())buffer.resize(64*1024);
+      start=offset;
+      filled=0;
+      const auto wanted=static_cast<std::size_t>(std::min<std::uint64_t>(buffer.size(),index.size-offset));
+      while(filled<wanted) {
+        const auto read_bytes=pread(index.file,buffer.data()+filled,wanted-filled,static_cast<off_t>(start+filled));
+        if(read_bytes<0 && errno==EINTR)continue;
+        if(read_bytes<0){filled=0;return false;}
+        if(read_bytes==0)break;
+        filled+=static_cast<std::size_t>(read_bytes);
+      }
+      if(count>filled)return false;
+    }
+    std::memcpy(destination,buffer.data()+(offset-start),count);
+#endif
+    return true;
+  }
+};
+static unsigned int truehd_unit_size(const unsigned char* header) {
+  return ((static_cast<unsigned int>(header[0])<<8|header[1])&0xfff)*2;
+}
 #ifdef _WIN32
 static std::string file_identity(HANDLE file) {
   BY_HANDLE_FILE_INFORMATION info{};if(file==INVALID_HANDLE_VALUE || !GetFileInformationByHandle(file,&info))return {};
@@ -92,24 +128,36 @@ static std::shared_ptr<Index> build_index(const char* path,std::string& error) {
   index->identity=file_identity(index->file);if(index->identity.empty()){error="Cannot identify THD+AC3 source";return {};}
   struct stat info{};if(fstat(index->file,&info) || info.st_size<16){error="Invalid THD+AC3 source size";return {};}
   index->size=static_cast<std::uint64_t>(info.st_size);
-  void* view=mmap(nullptr,static_cast<std::size_t>(index->size),PROT_READ,MAP_PRIVATE,index->file,0);
-  if(view==MAP_FAILED){error="Cannot map THD+AC3 source";return {};}
-  index->data=static_cast<const unsigned char*>(view);
 #endif
+  ReadWindow reader;
+  constexpr std::array<int,3> ac3_rates{{48000,44100,32000}};
+  std::array<std::uint64_t,ac3_rates.size()> core_frame_periods{};
+  long double core_frame_duration=0;
   std::uint64_t pos=0;Segment current{};bool active=false;
-  while(pos+8<=index->size) {
-    const auto p=index->data+pos;
+  while(index->size-pos>=8) {
+    unsigned char p[8];
+    if(!reader.read(*index,pos,p,sizeof(p))){error="Cannot read THD+AC3 frame header";return {};}
     if(p[0]==0x0b && p[1]==0x77) {
       const int bytes=ac3_size(p);
-      if(bytes<8 || pos+bytes>index->size){error="Invalid AC3 frame in combined stream";return {};}
+      if(bytes<8 || static_cast<unsigned int>(bytes)>index->size-pos){error="Invalid AC3 frame in combined stream";return {};}
       if(active){index->segments.push_back(current);active=false;}
-      pos+=static_cast<unsigned int>(bytes);++index->ac3_frames;continue;
+      const auto fscod=p[4]>>6;
+      const auto period=1u<<std::max(0,(p[5]>>3)-8);
+      core_frame_periods[fscod]+=period;
+      core_frame_duration=std::max(core_frame_duration,1536.0L*period/ac3_rates[fscod]);
+      pos+=static_cast<unsigned int>(bytes);continue;
     }
-    const unsigned int bytes=((static_cast<unsigned int>(p[0])<<8|p[1])&0xfff)*2;
-    if(bytes<8 || pos+bytes>index->size){error="Invalid TrueHD access unit in combined stream";return {};}
+    const unsigned int bytes=truehd_unit_size(p);
+    if(bytes<8 || bytes>index->size-pos){error="Invalid TrueHD access unit in combined stream";return {};}
     const bool major=p[4]==0xf8 && p[5]==0x72 && p[6]==0x6f && p[7]==0xba;
     if(major) {
-      const int ratebits=p[8]>>4;
+      unsigned char rate_byte;
+      if(bytes<=sizeof(p) || !reader.read(*index,pos+sizeof(p),&rate_byte,1)) {
+        error="Incomplete TrueHD major sync header";
+        return {};
+      }
+      const int ratebits=rate_byte>>4;
+      if(ratebits==0xf){error="Unsupported TrueHD sample rate";return {};}
       const int rate=(ratebits&8?44100:48000)<<(ratebits&7);
       const int samples=40<<(ratebits&7);
       if(index->rate && (index->rate!=rate || index->samples_per_unit!=samples)){error="TrueHD rate changes inside source";return {};}
@@ -121,11 +169,22 @@ static std::shared_ptr<Index> build_index(const char* path,std::string& error) {
     current.length+=bytes;++current.units;++index->units;pos+=bytes;
   }
   if(active)index->segments.push_back(current);
-  if(pos!=index->size || !index->ac3_frames || !index->units || !index->rate || index->syncs.empty()) {error="Incomplete or unsupported THD+AC3 layout";return {};}
-  const auto truehd_frames=index->units*static_cast<std::uint64_t>(index->samples_per_unit);
-  const auto core_frames=index->ac3_frames*1536;
-  const auto difference=truehd_frames>core_frames?truehd_frames-core_frames:core_frames-truehd_frames;
-  if(difference>3072){error="AC3 and TrueHD timelines do not match";return {};}
+  if(pos!=index->size || !core_frame_duration || !index->units || index->syncs.empty()) {
+    error="Incomplete or unsupported THD+AC3 layout";
+    return {};
+  }
+  if(index->units>static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()/index->samples_per_unit)) {
+    error="THD+AC3 sample count exceeds supported range";
+    return {};
+  }
+  long double core_duration=0;
+  for(std::size_t i=0;i<ac3_rates.size();++i)
+    core_duration+=1536.0L*core_frame_periods[i]/ac3_rates[i];
+  const long double truehd_duration=static_cast<long double>(index->units)*index->samples_per_unit/index->rate;
+  if(std::abs(truehd_duration-core_duration)>2*core_frame_duration) {
+    error="AC3 and TrueHD timelines do not match";
+    return {};
+  }
   return index;
 }
 static std::mutex index_mutex;
@@ -135,7 +194,11 @@ static std::shared_ptr<Index> get_index(const char* path,std::string& error) {
   const auto identity=path_identity(path);if(identity.empty()){error="Cannot identify THD+AC3 source";return {};}
   const std::string key=(path?path:"")+std::string("|")+identity;
   if(auto found=index_cache.find(key);found!=index_cache.end())if(auto value=found->second.lock())return value;
-  auto value=build_index(path,error);if(value && value->identity!=identity){error="THD+AC3 source changed during indexing";return {};}
+  auto value=build_index(path,error);
+  if(value && (value->identity!=identity || file_identity(value->file)!=identity || path_identity(path)!=identity)) {
+    error="THD+AC3 source changed during indexing";
+    return {};
+  }
   if(value)index_cache[key]=value;return value;
 }
 static double sample_value(const AVFrame* frame,int channel,int sample,int channels) {
@@ -168,13 +231,22 @@ class Decoder final:public ThdAc3Decoder {
   decltype(&av_new_packet) p_new_packet{};decltype(&av_packet_unref) p_packet_unref{};decltype(&av_frame_unref) p_frame_unref{};
   std::uint64_t next_unit{},physical{};std::size_t segment_index{};
   int channel_count{};
-  std::int64_t decoded_next{};std::vector<double> samples;std::size_t sample_offset{};std::int64_t samples_start{};bool failed{};
-  bool locate(std::uint64_t unit,std::uint64_t exact_offset=UINT64_MAX) {
-    auto it=std::upper_bound(index->segments.begin(),index->segments.end(),unit,[](std::uint64_t value,const Segment& s){return value<s.first_unit;});
-    if(it==index->segments.begin())return false;--it;segment_index=static_cast<std::size_t>(it-index->segments.begin());
-    if(unit>=it->first_unit+it->units)return false;
-    physical=it->offset;for(std::uint64_t n=it->first_unit;n<unit;++n)physical+=((index->data[physical]<<8|index->data[physical+1])&0xfff)*2;
-    if(exact_offset!=UINT64_MAX && physical!=exact_offset)return false;next_unit=unit;return true;
+  ReadWindow reader;
+  std::vector<double> samples;
+  std::size_t sample_offset{};
+  std::int64_t samples_start{};
+  bool input_ended{};
+  bool locate(const SyncPoint& sync) {
+    auto it=std::upper_bound(index->segments.begin(),index->segments.end(),sync.unit,
+      [](std::uint64_t unit,const Segment& segment){return unit<segment.first_unit;});
+    if(it==index->segments.begin())return false;
+    --it;
+    if(sync.unit>=it->first_unit+it->units || sync.offset<it->offset || sync.offset>=it->offset+it->length)
+      return false;
+    segment_index=static_cast<std::size_t>(it-index->segments.begin());
+    physical=sync.offset;
+    next_unit=sync.unit;
+    return true;
   }
   bool append_frame() {
 #if LIBAVCODEC_VERSION_MAJOR == 59
@@ -189,15 +261,28 @@ class Decoder final:public ThdAc3Decoder {
     if(count!=channel_count)return false;
     const auto old=samples.size();samples.resize(old+static_cast<std::size_t>(frame->nb_samples)*count);
     for(int i=0;i<frame->nb_samples;++i)for(int ch=0;ch<count;++ch)samples[old+static_cast<std::size_t>(i)*count+ch]=sample_value(frame,ch,i,count);
-    decoded_next+=frame->nb_samples;p_frame_unref(frame);return true;
+    p_frame_unref(frame);return true;
   }
   bool feed_one() {
     if(next_unit>=index->units)return false;
+    const auto& current=index->segments[segment_index];
+    if(next_unit>=current.first_unit+current.units) {
+      ++segment_index;
+      if(segment_index>=index->segments.size())return false;
+      physical=index->segments[segment_index].offset;
+    }
     const auto& segment=index->segments[segment_index];
-    if(next_unit>=segment.first_unit+segment.units){++segment_index;if(segment_index>=index->segments.size())return false;physical=index->segments[segment_index].offset;}
-    const unsigned int bytes=((index->data[physical]<<8|index->data[physical+1])&0xfff)*2;
-    p_packet_unref(packet);if(p_new_packet(packet,static_cast<int>(bytes))<0)return false;
-    memcpy(packet->data,index->data+physical,bytes);physical+=bytes;++next_unit;
+    const auto end=segment.offset+segment.length;
+    unsigned char header[2];
+    if(physical>end || end-physical<sizeof(header) || !reader.read(*index,physical,header,sizeof(header)))
+      return false;
+    const unsigned int bytes=truehd_unit_size(header);
+    if(bytes<8 || bytes>end-physical)return false;
+    p_packet_unref(packet);
+    if(p_new_packet(packet,static_cast<int>(bytes))<0 || !reader.read(*index,physical,packet->data,bytes))
+      return false;
+    physical+=bytes;
+    ++next_unit;
     int sent=p_send(context,packet);
     while(sent==AVERROR(EAGAIN)) {const int got=p_receive(context,frame);if(got<0 || !append_frame())return false;sent=p_send(context,packet);}
     if(sent<0)return false;
@@ -208,8 +293,13 @@ class Decoder final:public ThdAc3Decoder {
     const auto target_unit=static_cast<std::uint64_t>(std::max<std::int64_t>(0,target))/index->samples_per_unit;
     auto it=std::upper_bound(index->syncs.begin(),index->syncs.end(),target_unit,[](std::uint64_t value,const SyncPoint& s){return value<s.unit;});
     if(it==index->syncs.begin())it=index->syncs.begin();else --it;
-    if(!locate(it->unit,it->offset))return false;
-    p_flush(context);samples.clear();sample_offset=0;samples_start=decoded_next=static_cast<std::int64_t>(it->unit)*index->samples_per_unit;failed=false;return true;
+    if(!locate(*it))return false;
+    p_flush(context);
+    samples.clear();
+    sample_offset=0;
+    samples_start=static_cast<std::int64_t>(it->unit)*index->samples_per_unit;
+    input_ended=false;
+    return true;
   }
 public:
   Decoder(const char* path,ModuleHandle codec_mod,ModuleHandle util_mod,std::string& error):codec_module(codec_mod),util_module(util_mod) {
@@ -246,16 +336,37 @@ public:
   std::int64_t frames()const override{return static_cast<std::int64_t>(index->units)*index->samples_per_unit;}
   int abi()const override{return LIBAVCODEC_VERSION_MAJOR;}
   int read(std::int64_t position,double* output,int length) override {
-    if(!output || length<=0 || position<0 || position>=frames() || failed)return 0;
-    const auto buffered_frames=(samples.size()/channels())-sample_offset;
-    if(position<samples_start || position>samples_start+static_cast<std::int64_t>(buffered_frames) || position!=samples_start)if(!seek_to(position)){failed=true;return 0;}
-    while(samples_start+static_cast<std::int64_t>((samples.size()/channels())-sample_offset)<position+length && feed_one()){}
-    const auto skip=static_cast<std::size_t>(position-samples_start);sample_offset+=skip;samples_start=position;
-    const auto available=(samples.size()/channels())-sample_offset;const int count=static_cast<int>(std::min<std::size_t>(available,length));
-    memcpy(output,samples.data()+sample_offset*channels(),static_cast<std::size_t>(count)*channels()*sizeof(double));
-    sample_offset+=count;samples_start+=count;
-    if(sample_offset>4096){samples.erase(samples.begin(),samples.begin()+static_cast<std::ptrdiff_t>(sample_offset*channels()));sample_offset=0;}
-    return count;
+    if(!output || length<=0 || position<0 || position>=frames())return 0;
+    length=static_cast<int>(std::min<std::int64_t>(length,frames()-position));
+    if(position!=samples_start && !seek_to(position))return 0;
+
+    // Samples before the first major sync cannot be decoded. Keep their place on the timeline.
+    const auto prefix=static_cast<int>(std::clamp<std::int64_t>(samples_start-position,0,length));
+    if(prefix) {
+      const auto values=static_cast<std::size_t>(prefix)*channels();
+      std::fill_n(output,values,0.0);
+      if(prefix==length)return prefix;
+      output+=values;
+      position+=prefix;
+      length-=prefix;
+    }
+
+    const auto skip=static_cast<std::size_t>(position-samples_start);
+    const auto buffered=[&]{return samples.size()/channels()-sample_offset;};
+    while(buffered()<skip+static_cast<std::size_t>(length) && !input_ended)
+      input_ended=!feed_one();
+    if(skip>=buffered())return prefix;
+
+    sample_offset+=skip;
+    const int count=static_cast<int>(std::min<std::size_t>(buffered(),length));
+    std::memcpy(output,samples.data()+sample_offset*channels(),static_cast<std::size_t>(count)*channels()*sizeof(double));
+    sample_offset+=count;
+    samples_start=position+count;
+    if(sample_offset>4096) {
+      samples.erase(samples.begin(),samples.begin()+static_cast<std::ptrdiff_t>(sample_offset*channels()));
+      sample_offset=0;
+    }
+    return prefix+count;
   }
 };
 }
