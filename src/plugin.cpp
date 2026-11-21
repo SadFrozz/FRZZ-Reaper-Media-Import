@@ -1,5 +1,7 @@
 #define REAPERAPI_IMPLEMENT
 #include "support.h"
+#include "container_audio.h"
+#include "container_native_video.h"
 #include "subtitle_parser.h"
 #include "media_metadata.h"
 #include "thd_ac3.h"
@@ -121,7 +123,7 @@ public:
   const char* GetType() override {return "FRZZ_SUBTITLE";}
   const char* GetFileName() override {return file.c_str();}
   bool SetFileName(const char* name) override {
-    try { file=name?name:""; cues=parse_subtitles(read_utf8(file.c_str()),identify_format(file)); available=true; log("subtitle parsed id=%llu cues=%zu",id,cues.size()); return true; }
+    try { file=name?name:""; cues=parse_subtitles(read_subtitle_file(file.c_str()),identify_format(file)); available=true; log("subtitle parsed id=%llu cues=%zu",id,cues.size()); return true; }
     catch(const std::exception& e) {available=false; log("subtitle error id=%llu %s",id,e.what()); return false;}
     catch(...) {available=false; return false;}
   }
@@ -373,15 +375,18 @@ static PCM_source* create_type(const char* type,int priority) {
   if(!strcmp(type,raw_audio_type) || !strcmp(type,"FRZZ_VIDEO")) {
     try{return PCM_Source_CreateFromSimple(new RawAudioDecoder,nullptr);}catch(...){return nullptr;}
   }
-  if(strcmp(type,"FRZZ_SUBTITLE")) return nullptr;
-  try{return new SubtitleSource;}catch(...){return nullptr;}
+  try {
+    if(!strcmp(type,"FRZZ_SUBTITLE"))return new SubtitleSource;
+    return create_container_type(type,main_thread);
+  } catch(...){return nullptr;}
 }
 static PCM_source* create_file(const char* path,int priority) {
+  if(priority!=0)return nullptr;
   const auto format=identify_format(path);
-  if(format==Format::unsupported) return nullptr;
-  log("CreateFromFile priority=%d path=%s",priority,path);
-  if(priority!=0) return nullptr;
   try {
+    if(format==Format::unsupported)
+      return current_thread_id()==main_thread?create_container_source(path):nullptr;
+    log("CreateFromFile priority=%d path=%s",priority,path);
     if(format==Format::raw_audio) return create_raw_audio(path);
     auto src=std::make_unique<SubtitleSource>();
     if(!src->SetFileName(path)) return nullptr;
@@ -393,7 +398,7 @@ static const char* extensions(int i,const char** desc) {
   if(desc) *desc=nullptr;
   if(i<0 || static_cast<size_t>(i)>=extensions_list.size())return nullptr;
   const auto& e=extensions_list[static_cast<size_t>(i)];
-  if(desc)*desc=e.format==Format::raw_audio?"FRZZ Dolby/DTS audio":"FRZZ subtitles (ASS/SSA/SRT)";
+  if(desc)*desc=e.format==Format::raw_audio?"FRZZ Dolby/DTS audio":"FRZZ subtitles (ASS/SSA/SRT/VTT)";
   return e.name;
 }
 static pcmsrc_register_t registry{create_type,create_file,extensions};
@@ -404,13 +409,21 @@ static void timer() {
   struct Running {bool& v; Running(bool& flag):v(flag){v=true;} ~Running(){v=false;}} guard(running);
   try {
     process_pending();
+    poll_container_video();
+    poll_container_peaks();
   } catch(const std::exception& e) {log("timer error=%s",e.what());} catch(...) {log("timer unknown error");}
 }
 }
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE,reaper_plugin_info_t* rec) {
   using namespace frzz;
   if(!rec) {
-    if(reg) {reg("-timer",reinterpret_cast<void*>(timer)); reg("-pcmsrc",&registry);}
+    if(reg) {
+      reg("-timer",reinterpret_cast<void*>(timer));
+      cancel_container_peaks();
+      unregister_container_track_menu();
+      reg("-pcmsrc",&registry);
+      shutdown_native_video_tracks();
+    }
     {std::lock_guard<std::mutex> lock(queue_mutex);pending.clear();}
     log("plugin unloaded"); return 0;
   }
@@ -420,10 +433,12 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_H
 #ifdef FRZZ_ENABLE_LOGGING
     log_file.open(std::filesystem::u8path(GetResourcePath())/"frzz_media_import.log",std::ios::app);
 #endif
-    log("plugin loaded host=%s plugin=1.1.1 extensions=25 target=REAPER7.66+FFmpeg5+",GetAppVersion());
+    log("plugin loaded host=%s plugin=1.2.0 extensions=%zu target=REAPER7.66+FFmpeg5+",GetAppVersion(),extensions_list.size());
     reg=rec->Register;
+    set_native_video_peak_api(rec->GetFunc("GetPeakFileNameEx2"),rec->GetFunc("GetPeakFileNameEx"),rec->GetFunc("GetPeakFileName"));
     if(!reg("pcmsrc",&registry)) return 0;
     if(!reg("timer",reinterpret_cast<void*>(timer))) {reg("-pcmsrc",&registry);return 0;}
+    register_container_track_menu(reg);
     reg("ext_name",const_cast<char*>("FRZZ native media import"));
     return 1;
   } catch(...) {return 0;}

@@ -1,4 +1,5 @@
 #include "subtitle_parser.h"
+#include "text_encoding.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -6,9 +7,10 @@
 #include <optional>
 #include <string_view>
 #include <stdexcept>
+#include <utility>
 
 namespace frzz {
-std::string read_utf8(const char* path) {
+std::string read_subtitle_file(const char* path) {
   std::ifstream f(std::filesystem::u8path(path), std::ios::binary);
   if (!f) throw std::runtime_error("Cannot open subtitle file");
   f.seekg(0, std::ios::end);
@@ -18,22 +20,6 @@ std::string read_utf8(const char* path) {
   std::string data(static_cast<size_t>(size),'\0');
   if(!data.empty() && !f.read(data.data(),size)) throw std::runtime_error("Cannot read subtitle file");
   return data;
-}
-static bool valid_utf8(const std::string& data) {
-  for(size_t i=0;i<data.size();) {
-    const auto c=static_cast<unsigned char>(data[i]);
-    if(c<0x80){++i;continue;}
-    int extra=0;unsigned int value=0,minimum=0;
-    if((c&0xe0)==0xc0){extra=1;value=c&0x1f;minimum=0x80;}
-    else if((c&0xf0)==0xe0){extra=2;value=c&0x0f;minimum=0x800;}
-    else if((c&0xf8)==0xf0){extra=3;value=c&0x07;minimum=0x10000;}
-    else return false;
-    if(i+static_cast<size_t>(extra)>=data.size())return false;
-    for(int n=0;n<extra;++n){const auto next=static_cast<unsigned char>(data[++i]);if((next&0xc0)!=0x80)return false;value=(value<<6)|(next&0x3f);}
-    if(value<minimum || value>0x10ffff || (value>=0xd800 && value<=0xdfff))return false;
-    ++i;
-  }
-  return true;
 }
 static bool whitespace(char c) {
   return c==' ' || c=='\t';
@@ -322,9 +308,158 @@ std::vector<Cue> parse_srt(const std::string& contents) {
   return result;
 }
 
+static std::optional<double> vtt_time(std::string_view& text) {
+  int first,second,seconds,hours=0,minutes;
+  const auto initial=text.size();
+  if(!read_number(text,first,10))return {};
+  const auto first_width=initial-text.size();
+  if(first_width<2 || !consume(text,':'))return {};
+  const auto minute_start=text.size();
+  if(!read_number(text,second,2) || minute_start-text.size()!=2)return {};
+  if(consume(text,':')) {
+    hours=first;
+    minutes=second;
+    const auto second_start=text.size();
+    if(!read_number(text,seconds,2) || second_start-text.size()!=2)return {};
+  } else {
+    if(first_width!=2)return {};
+    minutes=first;
+    seconds=second;
+  }
+  if(minutes>59 || seconds>59 || !consume(text,'.'))return {};
+  const auto fraction_start=text.size();
+  int millis;
+  if(!read_number(text,millis,3) || fraction_start-text.size()!=3)return {};
+  return hours*3600.0+minutes*60.0+seconds+millis/1000.0;
+}
+
+static std::optional<Cue> vtt_timing(std::string_view line) {
+  const auto start=vtt_time(line);
+  if(!start || line.empty() || !whitespace(line.front()))return {};
+  line=trim_left(line);
+  if(!starts_with(line,"-->"))return {};
+  line.remove_prefix(3);
+  if(line.empty() || !whitespace(line.front()))return {};
+  line=trim_left(line);
+  const auto end=vtt_time(line);
+  if(!end || (!line.empty() && !whitespace(line.front())))return {};
+  return Cue{*start,*end,{}};
+}
+
+static bool append_vtt_reference(std::string& out,std::string_view ref) {
+  constexpr std::pair<std::string_view,unsigned> named[]={
+    {"amp",38},{"lt",60},{"gt",62},{"quot",34},{"apos",39},
+    {"nbsp",0xa0},{"lrm",0x200e},{"rlm",0x200f}
+  };
+  for(const auto& [name,value]:named) {
+    if(ref==name) {
+      append_utf8(out,value);
+      return true;
+    }
+  }
+  if(!consume(ref,'#'))return false;
+  const int base=consume(ref,'x') || consume(ref,'X') ? 16 : 10;
+  if(ref.empty())return false;
+  unsigned value;
+  const auto end=ref.data()+ref.size();
+  const auto number=std::from_chars(ref.data(),end,value,base);
+  if(number.ec!=std::errc{} || number.ptr!=end)return false;
+  if(!value || value>0x10ffff || (value>=0xd800 && value<=0xdfff))value=0xfffd;
+  append_utf8(out,value);
+  return true;
+}
+static size_t append_vtt_character(std::string& out,std::string_view text) {
+  if(text.front()=='&') {
+    // Look only as far as the next reference or tag boundary.
+    const auto end=text.find_first_of(";&<> \t\r\n",1);
+    if(end!=std::string_view::npos && text[end]==';' && append_vtt_reference(out,text.substr(1,end-1)))
+      return end+1;
+  }
+  out+=text.front();
+  return 1;
+}
+
+static std::string vtt_plain_text(std::string_view text) {
+  std::string out;
+  bool ruby_annotation=false;
+  while(!text.empty()) {
+    if(text.front()=='<') {
+      const auto end=text.find_first_of("<>\r\n",1);
+      if(end!=std::string_view::npos && text[end]=='>') {
+        auto tag=text.substr(1,end-1);
+        const bool closing=consume(tag,'/');
+        const auto name=tag.substr(0,tag.find_first_of(". \t"));
+        if(name=="v" || name=="c" || name=="lang" || name=="b" || name=="i" ||
+           name=="u" || name=="ruby" || name=="rt") {
+          if(name=="rt")ruby_annotation=!closing;
+          if(name=="ruby" && closing)ruby_annotation=false;
+          if(name=="v" && !closing && !ruby_annotation) {
+            const auto space=tag.find_first_of(" \t");
+            auto voice=space==std::string_view::npos ? std::string_view{} : trim(tag.substr(space));
+            if(!voice.empty()) {
+              if(!out.empty() && out.back()!='\n' && !whitespace(out.back()))out+=' ';
+              out+='[';
+              while(!voice.empty())voice.remove_prefix(append_vtt_character(out,voice));
+              out+="] ";
+            }
+          }
+          text.remove_prefix(end+1);
+          continue;
+        }
+        if(!closing && vtt_time(tag) && tag.empty()) {
+          text.remove_prefix(end+1);
+          continue;
+        }
+      }
+    }
+    text.remove_prefix(ruby_annotation ? 1 : append_vtt_character(out,text));
+  }
+  return out;
+}
+
+static std::vector<Cue> parse_vtt(const std::string& contents) {
+  const auto lines=lines_of(contents);
+  if(lines.empty() || !starts_with(lines.front(),"WEBVTT") ||
+     (lines.front().size()>6 && !whitespace(lines.front()[6])))
+    throw std::runtime_error("Missing WEBVTT header");
+
+  std::vector<Cue> result;
+  size_t at=1;
+  while(at<lines.size() && !trim(lines[at]).empty())++at;
+  while(at<lines.size()) {
+    if(trim(lines[at]).empty()){++at;continue;}
+    const auto first=at;
+    const auto header=trim(lines[at]);
+    while(at<lines.size() && !trim(lines[at]).empty())++at;
+    if(header=="NOTE" || starts_with(header,"NOTE ") || starts_with(header,"NOTE\t"))continue;
+
+    auto timing=first;
+    if(header.find("-->")==std::string_view::npos)++timing; // Optional cue identifier.
+    auto cue=timing<at ? vtt_timing(trim(lines[timing])) : std::nullopt;
+    if(!cue && (header=="STYLE" || header=="REGION"))continue;
+    if(!cue || cue->end<cue->start)
+      throw std::runtime_error("Invalid WebVTT timing at line "+std::to_string(std::min(timing,at-1)+1));
+    std::string payload;
+    for(auto body=timing+1;body<at;++body) {
+      if(body>timing+1)payload+='\n';
+      payload+=lines[body];
+    }
+    cue->text=vtt_plain_text(payload);
+    result.push_back(std::move(*cue));
+  }
+  if(result.empty())throw std::runtime_error("No WebVTT cues");
+  return result;
+}
+
 std::vector<Cue> parse_subtitles(const std::string& contents,Format format) {
-  if(format==Format::srt)return parse_srt(contents);
-  if(format==Format::ass || format==Format::ssa)return parse_ass(contents);
+  std::string decoded;
+  const bool little_endian=starts_with(contents,"\xff\xfe");
+  const bool big_endian=starts_with(contents,"\xfe\xff");
+  if(little_endian || big_endian)decoded=decode_utf16(std::string_view(contents).substr(2),little_endian);
+  const auto& text=little_endian || big_endian ? decoded : contents;
+  if(format==Format::srt)return parse_srt(text);
+  if(format==Format::ass || format==Format::ssa)return parse_ass(text);
+  if(format==Format::vtt)return parse_vtt(text);
   throw std::runtime_error("Unsupported subtitle extension");
 }
 }

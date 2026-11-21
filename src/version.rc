@@ -1,7 +1,7 @@
 #include <windows.h>
 1 VERSIONINFO
-FILEVERSION 1,1,1,0
-PRODUCTVERSION 1,1,1,0
+FILEVERSION 1,2,0,0
+PRODUCTVERSION 1,2,0,0
 FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -12,9 +12,9 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "FRZZ REAPER native media import"
-      VALUE "FileVersion", "1.1.1"
+      VALUE "FileVersion", "1.2.0"
       VALUE "ProductName", "FRZZ REAPER Media Import"
-      VALUE "ProductVersion", "1.1.1"
+      VALUE "ProductVersion", "1.2.0"
       VALUE "OriginalFilename", "reaper_frzz_media_import.dll"
     END
   END

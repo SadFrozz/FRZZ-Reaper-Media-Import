@@ -2,9 +2,9 @@
 #include <array>
 #include <string_view>
 namespace frzz {
-enum class Format { unsupported, raw_audio, ass, ssa, srt };
+enum class Format { unsupported, raw_audio, ass, ssa, srt, vtt };
 struct Extension { const char* name; Format format; };
-inline constexpr std::array<Extension,25> extensions_list{{
+inline constexpr std::array<Extension,26> extensions_list{{
   {"ac3",Format::raw_audio},{"eac3",Format::raw_audio},{"ec3",Format::raw_audio},
   {"ddp",Format::raw_audio},{"ac4",Format::raw_audio},{"thd",Format::raw_audio},
   {"truehd",Format::raw_audio},{"thd+ac3",Format::raw_audio},{"mlp",Format::raw_audio},
@@ -12,7 +12,7 @@ inline constexpr std::array<Extension,25> extensions_list{{
   {"dtsma",Format::raw_audio},{"dts-ma",Format::raw_audio},{"dts-hdma",Format::raw_audio},
   {"dts-hd-ma",Format::raw_audio},{"dtses",Format::raw_audio},{"dts-es",Format::raw_audio},
   {"dtsx",Format::raw_audio},{"dts-x",Format::raw_audio},{"dtsuhd",Format::raw_audio},
-  {"dts-uhd",Format::raw_audio},{"ass",Format::ass},{"ssa",Format::ssa},{"srt",Format::srt}
+  {"dts-uhd",Format::raw_audio},{"ass",Format::ass},{"ssa",Format::ssa},{"srt",Format::srt},{"vtt",Format::vtt}
 }};
 inline Format identify_format(std::string_view path) {
   const auto dot=path.rfind('.');

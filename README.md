@@ -20,7 +20,7 @@ Native Dolby, DTS and subtitle import for REAPER on Windows and macOS.
 
 ### Возможности
 
-Расширение Reaper Media Import добавляет в штатный импорт REAPER поддержку raw Dolby/DTS/MLP-аудио и субтитров ASS, SSA и SRT.
+Расширение Reaper Media Import добавляет в штатный импорт REAPER поддержку raw Dolby/DTS/MLP-аудио и субтитров ASS, SSA, SRT и WebVTT.
 
 - Нативная поддержка импорта файлов данных форматов любом удобным способом (как через штатное контекстное меню, так и через горячие клавиши или перетаскивание в окно Reaper).
 - Совместимо с Windows x64 и macOS Universal 2 с архитектурами Intel и Apple Silicon.
@@ -86,11 +86,11 @@ xattr -d com.apple.quarantine \
 
 ### Поддерживаемые форматы
 
-Расширение регистрирует 25 расширений без учёта регистра:
+Расширение регистрирует 26 расширений без учёта регистра:
 
 | Семейство | Расширения |
 | --- | --- |
-| Субтитры | `.srt`, `.ass`, `.ssa` |
+| Субтитры | `.srt`, `.ass`, `.ssa`, `.vtt` |
 | Dolby / MLP | `.ac3`, `.eac3`, `.ec3`, `.ddp`, `.ac4`, `.thd`, `.truehd`, `.thd+ac3`, `.mlp` |
 | DTS | `.dts`, `.dtshd`, `.dts-hd`, `.dtsma`, `.dts-ma`, `.dts-hdma`, `.dts-hd-ma`, `.dtses`, `.dts-es`, `.dtsx`, `.dts-x`, `.dtsuhd`, `.dts-uhd` |
 
@@ -98,17 +98,37 @@ xattr -d com.apple.quarantine \
 
 ### Как это работает
 
+#### Выбор аудиодорожки из MKV или MP4
+
+При обычной вставке многодорожечного MKV или MP4 открывается окно выбора с языком, названием, кодеком, числом каналов и их порядком. Если в файле есть видео, REAPER вставляет его с выбранной аудиодорожкой и читает оба потока из исходного файла. **Selected default audiotrack** и Escape выбирают доступную дорожку, помеченную в контейнере как дорожка по умолчанию, или первую доступную при отсутствии такой отметки. Один Undo отменяет вставку, а Redo возвращает видео с выбранной дорожкой.
+
+Пункт **Audio track** находится сразу после **Take markers** в контекстном меню айтема и в верхнем меню **Item**. Если в выделении несколько видео с несколькими аудиодорожками, сначала выберите видео. Если такое видео одно, меню сразу покажет его дорожки. Действие **Change Audio Track for selected video item** с тулбара открывает выпадающее меню. Из **Action List** оно открывает окно выбора дорожки. Если подходят несколько выбранных видео, перед ним открывается окно **Choose video item**.
+
+Видео остаётся в том же тейке. Смена дорожки занимает одно действие Undo. Выбранная дорожка сохраняется в тейке и восстанавливается при открытии проекта. Если включена автоматическая генерация пиков, REAPER достраивает отсутствующие пики выбранной дорожки с текущими настройками.
+
+Первый переход далеко вперёд в длинном MKV с округлёнными временными метками может занять больше времени. Расширение уточняет позиции аудиокадров, чтобы при повторном чтении получить те же сэмплы.
+
+Из выбранной дорожки с высотными каналами импортируются основные каналы и LFE. Например, 7.1.2 импортируется как 7.1 без подмешивания верхней пары. Окно выбора показывает каналы полученного источника.
+
+Если в файле меньше двух аудиопотоков или для выбранного формата включён `ffmpeg_mta`, видео импортируется без меню выбора.
+
+На Windows x64 (проверенные сборки REAPER 7.66, 7.77, 7.85 и 7.86) и на macOS Intel (REAPER 7.85 с FFmpeg 9) для штатного источника VIDEO REAPER управляет очередью, окном **Building Peaks…** и обновлением волны по мере построения. Для каждого потока используется отдельный файл `.trackN.reapeaks`. При импорте и открытии проекта нативный источник попадает в очередь REAPER штатно. Если при смене дорожки её кэш отсутствует или неполный, расширение запрашивает построение с текущими настройками REAPER. Штатный источник VIDEO декодирует выбранный поток через FFmpeg, когда его временные метки и раскладка каналов это позволяют. Если выбранная дорожка начинается позже видео, расширение проверяет первый декодированный кадр и сохраняет начальную паузу в штатном источнике. Для потоков, которые штатный источник не может воспроизвести с нужным таймингом или порядком каналов, расширение читает сэмплы напрямую через FFmpeg.
+
+#### Raw-аудио и внешние субтитры
+
 REAPER получает Dolby, DTS и MLP как аудиоисточники. Расширение считывает точную длительность, частоту и число каналов через FFmpeg и использует штатный декодер REAPER для получения аудиосэмплов.
 
 Комбинированный `.thd+ac3` содержит чередующиеся кадры TrueHD и AC3. Расширение строит компактный индекс в памяти, пропускает AC3 и передаёт TrueHD access units декодеру FFmpeg прямо из исходного файла. Индекс не учитывает пики и строится отдельно от них; после перезапуска REAPER он создаётся заново. Копия медиа на диск не записывается.
 
 REAPER сохраняет эти аудиоисточники в проекте как `FRZZ_AUDIO`. Расширение также открывает источники `FRZZ_VIDEO` из старых проектов и при следующем сохранении записывает их как `FRZZ_AUDIO`. Для повторного открытия после пересохранения нужна версия расширения с поддержкой `FRZZ_AUDIO`.
 
-Субтитры в UTF-8 импортируются как обычные текстовые айтемы относительно фактической позиции импорта. Поддерживаются BOM, окончания строк LF/CRLF/CR и нулевая длительность реплик.
+Субтитры в UTF-8 и UTF-16 LE/BE с BOM импортируются как обычные текстовые айтемы относительно фактической позиции импорта. Поддерживаются BOM, окончания строк LF/CRLF/CR и нулевая длительность реплик.
 
 ASS/SSA учитывает секцию [Events] и порядок полей Format, сохраняет Actor и запятые в тексте, убирает служебные теги и команды рисования. Реплики с неизвестным стилем и разными слоями сохраняют текст и тайминг, включая пересечения. Оформление и визуальный порядок слоёв ASS применяются только при показе субтитров в плеере.
 
 SRT поддерживает миллисекунды, нумерованные и ненумерованные реплики, пустые строки внутри реплики и до 10 строк исходного текста на айтем. Оформительские теги вроде текста курсивом убираются.
+
+WebVTT импортирует реплики с полным таймингом и многострочным текстом. Имя из `<v>` переносится в заметку как `[Имя]`. Стили, регионы и настройки расположения предназначены для отображения субтитров в плеере.
 
 Импорт субтитров занимает одну запись в истории Undo REAPER. Одно действие Redo восстанавливает текстовые айтемы. Если до конвертации укоротить временный айтем, он сохраняет заданные границы.
 
@@ -121,6 +141,8 @@ SRT поддерживает миллисекунды, нумерованные 
 - Полный shared FFmpeg 5.x–9.x с major ABI libavcodec/libavformat 59–63.
 
 На Windows в REAPER 7.85 с FFmpeg 8.1.2 и 9.0.2 проверены импорт E-AC-3, DTS, MLP, TrueHD и TrueHD+AC3, чтение аудио, повторное открытие проекта и миграция `FRZZ_VIDEO`.
+
+Импорт видео с выбором дорожки проверен на Windows в REAPER 7.66 и 7.77 с FFmpeg 8.1, а также в REAPER 7.85 с FFmpeg 9.0.2. Проверены дорожка по умолчанию, Undo/Redo, изображение в окне Video и повторное использование кэша пиков.
 
 На macOS Intel (Sequoia 15.7.1) в REAPER 7.85 проверена shared-сборка FFmpeg 9.0.2 из релизных исходников. Проверены импорт, чтение и повторное открытие E-AC-3, DTS, DTS-HD, MLP, TrueHD и TrueHD+AC3. Для текущей версии также собран срез arm64.
 
@@ -165,11 +187,12 @@ ctest --preset mac-universal-release
 | Путь | Назначение |
 | --- | --- |
 | `src/plugin.cpp` | Регистрация расширений, интеграция с REAPER и импорт субтитров |
+| `src/container_audio.cpp`, `src/container_ffmpeg.cpp` | Выбор дорожки и прямое чтение аудиопотока из MKV и MP4 |
 | `src/media_metadata.cpp` | Метаданные raw-аудио и выбор загруженного FFmpeg ABI |
 | `src/ffmpeg_scan.cpp` | Адаптеры FFmpeg 5.x–9.x |
 | `src/thd_ac3.cpp` | Выбор FFmpeg ABI для `.thd+ac3` |
 | `src/thd_ac3_decoder.cpp` | Индексирование и потоковое декодирование TrueHD |
-| `src/subtitle_parser.cpp` | Парсер ASS, SSA и SRT |
+| `src/subtitle_parser.cpp` | Парсер ASS, SSA, SRT и WebVTT |
 | `tests/` | Автоматические тесты парсера |
 | `.github/workflows/ci.yml` | CI и автоматическая публикация релизов |
 
@@ -195,7 +218,7 @@ REAPER SDK, WDL и заголовки FFmpeg зафиксированы в `exte
 
 ### Features
 
-Reaper Media Import extends REAPER's native media import with raw Dolby/DTS/MLP audio and ASS, SSA and SRT subtitles.
+Reaper Media Import extends REAPER's native media import with raw Dolby/DTS/MLP audio and ASS, SSA, SRT and WebVTT subtitles.
 
 - Native file import through REAPER's standard context menu, keyboard shortcuts, or drag and drop.
 - Compatible with Windows x64 and macOS Universal 2 on Intel and Apple Silicon.
@@ -261,11 +284,11 @@ The steps below install FFmpeg 9 for REAPER 7.80 or later. For REAPER 7.66–7.7
 
 ### Supported formats
 
-The extension registers 25 case-insensitive file extensions:
+The extension registers 26 case-insensitive file extensions:
 
 | Family | Extensions |
 | --- | --- |
-| Subtitles | `.srt`, `.ass`, `.ssa` |
+| Subtitles | `.srt`, `.ass`, `.ssa`, `.vtt` |
 | Dolby / MLP | `.ac3`, `.eac3`, `.ec3`, `.ddp`, `.ac4`, `.thd`, `.truehd`, `.thd+ac3`, `.mlp` |
 | DTS | `.dts`, `.dtshd`, `.dts-hd`, `.dtsma`, `.dts-ma`, `.dts-hdma`, `.dts-hd-ma`, `.dtses`, `.dts-es`, `.dtsx`, `.dts-x`, `.dtsuhd`, `.dts-uhd` |
 
@@ -273,17 +296,37 @@ The codec inside a raw file must match its extension family. Renaming an unsuppo
 
 ### How it works
 
+#### Selecting an audio track from MKV or MP4
+
+Insert an MKV or MP4 using REAPER's regular media import. The multitrack dialog shows language, title, codec, channel count, and channel order when available. When the file contains video, REAPER inserts it with the selected audio track and reads both from the original file. **Selected default audiotrack** or Escape uses the playable track marked as default in the container, or the first playable track when no default is marked. A single Undo removes the item, and Redo restores the video with the selected track.
+
+Choose **Audio track** just below **Take markers** in the item context menu or the main **Item** menu. If the selection contains multiple videos with more than one audio track, choose the video first. If only one such video is selected, the menu shows its tracks directly. **Change Audio Track for selected video item** opens a popup from a toolbar. From the **Action List**, it opens an audio track dialog. If multiple selected videos qualify, it first opens the **Choose video item** dialog.
+
+The video stays in the same take. The change takes one Undo step. When automatic peak generation is enabled, REAPER builds missing peaks for that stream using the current settings.
+
+The first seek far into a long MKV with rounded timestamps can take longer while the extension indexes audio frames. This makes repeated reads return the same samples.
+
+For a selected track with height channels, the extension imports the main channels and LFE. For example, 7.1.2 imports as 7.1 without mixing in the height pair. The track dialog shows the resulting source channels.
+
+Files with fewer than two audio streams and formats with `ffmpeg_mta` enabled are imported without a track menu.
+
+The audio stream choice is saved with the take and restored when the project opens. On Windows x64 (verified REAPER builds 7.66, 7.77, 7.85 and 7.86) and macOS Intel (REAPER 7.85 with FFmpeg 9), REAPER manages the queue, the **Building Peaks…** window, and waveform updates for native VIDEO sources. Each stream has its own `.trackN.reapeaks` file. REAPER queues native sources during import and project loading. Switching a track requests a build if its cache is missing or incomplete, using the current REAPER settings. The native VIDEO source decodes the selected stream through FFmpeg when its timing and channel layout permit. When the selected stream starts later than the video, the extension verifies the first decoded frame and preserves the initial silence in the native source. The extension reads samples directly through FFmpeg for streams the native source cannot play with the required timing or channel order.
+
+#### Raw audio and external subtitles
+
 REAPER receives Dolby, DTS and MLP files as audio sources. The extension reads the exact duration, sample rate and channel count through FFmpeg and uses REAPER's built-in decoder to read audio samples.
 
 An interleaved `.thd+ac3` file contains alternating TrueHD and AC3 frames. The extension builds a compact in-memory index, skips AC3 and streams TrueHD access units from the original file directly into FFmpeg. Index construction is separate from peak calculation, the index is rebuilt after REAPER restarts, and no media copy is written to disk.
 
 REAPER saves these audio sources as `FRZZ_AUDIO`. The extension also opens `FRZZ_VIDEO` sources from existing projects and saves them as `FRZZ_AUDIO` on the next save. Reopening a resaved project requires a version of the extension that supports `FRZZ_AUDIO`.
 
-UTF-8 subtitles import as regular text items at the actual insertion position. The parser supports a BOM, LF/CRLF/CR line endings, and zero-duration cues.
+UTF-8 subtitles and UTF-16 LE/BE subtitles with a BOM import as regular text items at the actual insertion position. The parser supports a BOM, LF/CRLF/CR line endings, and zero-duration cues.
 
 ASS/SSA honors the [Events] section and Format column order, preserves Actor names and text commas, and strips override tags and drawing commands. Cues with unknown styles or different layers retain their text and timing, including overlaps. ASS styling and visual layer order apply when rendering subtitles in a player.
 
 SRT supports millisecond timing, numbered and unnumbered cues, blank lines within a cue, and up to 10 source text lines per item. Formatting tags such as italics are stripped.
+
+WebVTT imports cue timing and multiline text. The voice name from `<v>` appears as `[Name]` in the note. Styles, regions, and layout settings apply to subtitle rendering in a player.
 
 Subtitle import creates one entry in REAPER’s undo history. One redo restores the text items. If the placeholder is shortened before conversion, it retains its trimmed bounds.
 
@@ -296,6 +339,8 @@ Target environment:
 - Full shared FFmpeg 5.x–9.x with major ABI libavcodec/libavformat 59–63.
 
 On Windows, REAPER 7.85 with FFmpeg 8.1.2 and 9.0.2 was tested for E-AC-3, DTS, MLP, TrueHD and TrueHD+AC3 import, audio reads, project reopening and `FRZZ_VIDEO` migration.
+
+Video import with audio track selection was tested on Windows in REAPER 7.66 and 7.77 with FFmpeg 8.1, and in REAPER 7.85 with FFmpeg 9.0.2. The tests covered the default track, Undo/Redo, the picture in the Video window, and peak cache reuse.
 
 On macOS Intel (Sequoia 15.7.1), REAPER 7.85 was tested against shared FFmpeg 9.0.2 built from the release source. Import, audio reads, and reopening passed for E-AC-3, DTS, DTS-HD, MLP, TrueHD, and TrueHD+AC3. The arm64 slice of the current version was also built.
 
@@ -340,11 +385,12 @@ For a manual build, open **Actions → Build, test and release → Run workflow*
 | Path | Purpose |
 | --- | --- |
 | `src/plugin.cpp` | Extension registration, REAPER integration and subtitle import |
+| `src/container_audio.cpp`, `src/container_ffmpeg.cpp` | Track selection and in-place MKV/MP4 audio decoding |
 | `src/media_metadata.cpp` | Raw audio metadata and loaded FFmpeg ABI selection |
 | `src/ffmpeg_scan.cpp` | FFmpeg 5.x–9.x adapters |
 | `src/thd_ac3.cpp` | FFmpeg ABI selection for `.thd+ac3` |
 | `src/thd_ac3_decoder.cpp` | TrueHD indexing and streaming decoder |
-| `src/subtitle_parser.cpp` | ASS, SSA and SRT parser |
+| `src/subtitle_parser.cpp` | ASS, SSA, SRT and WebVTT parser |
 | `tests/` | Automated parser tests |
 | `.github/workflows/ci.yml` | CI and automated release publishing |
 

@@ -2,6 +2,30 @@
 
 [Русский](#русский) · [English](#english)
 
+## v1.2.0 — 2026-11-22
+
+### Русский
+
+- Добавлен импорт WebVTT с сохранением тайминга, многострочного текста и имён говорящих.
+- Добавлена поддержка UTF-16 LE/BE с BOM для всех форматов субтитров.
+- При вставке многодорожечных MKV и MP4 можно выбрать аудиодорожку по языку, названию, кодеку, числу и порядку каналов. Видео и выбранная дорожка читаются из исходного контейнера. Вставка занимает один шаг Undo. Файлы с одной аудиодорожкой и форматы, для которых включён `ffmpeg_mta`, импортируются штатно.
+- В контекстном меню айтема и верхнем меню **Item** сразу после **Take markers** добавлено подменю **Audio track**. Оно меняет звук активного тейка, сохраняя видео и границы секции. Undo и Redo переключают дорожку одним шагом.
+- В обоих меню можно выбрать видео из выделения, если подходят несколько айтемов. Действие **Change Audio Track for selected video item** с тулбара открывает меню, а из **Action List** открывает окно выбора дорожки. При нескольких подходящих видео **Action List** сначала открывает окно выбора айтема.
+- Для каждой дорожки сохраняется свой кэш пиков. REAPER показывает пики по мере построения и достраивает отсутствующие и неполные данные по текущим настройкам. Ручные команды построения пиков учитывают выбранные потоки и неактивные тейки.
+- Из дорожек с высотными каналами читаются основные каналы и LFE. Например, 7.1.2 импортируется как 7.1, а 9.1.6 как 9.1. Пики строятся по сохранённым каналам выбранной дорожки. Команда **Explode multichannel audio** использует каналы выбранной дорожки.
+- Исправлено воспроизведение начальных пауз выбранной дорожки в MKV и MP4, включая задержку декодера E-AC-3 в Matroska. Уточнена перемотка и исправлено чтение многодорожечных источников, открытых напрямую через ReaScript.
+
+### English
+
+- Added WebVTT import with cue timing, multiline text, and voice names.
+- Added UTF-16 LE/BE support with a BOM for all subtitle formats.
+- Native import shows language, title, codec, channel count, and channel order for multitrack MKV and MP4. Video and the selected audio track are read from the original container, with one undo step for insertion. Files with one audio stream and formats with `ffmpeg_mta` enabled use native import.
+- **Audio track** appears directly after **Take markers** in the item context menu and the main **Item** menu. It switches the active take's audio while preserving video and section bounds. Undo and redo switch the stream in one step.
+- Both menus let you choose a video when multiple selected items have switchable audio tracks. **Change Audio Track for selected video item** opens a popup from a toolbar and an audio track dialog from the **Action List**. With multiple eligible videos, the **Action List** first opens an item selection dialog.
+- Each stream has its own peak cache. REAPER displays peaks as they are built and completes missing or incomplete data using the current settings. Manual peak commands use the selected streams and include inactive takes.
+- Tracks with height channels retain their main channels and LFE. For example, 7.1.2 imports as 7.1 and 9.1.6 as 9.1. Peaks represent the retained channels of the selected track. **Explode multichannel audio** uses the selected stream's channels.
+- Fixed playback of leading audio gaps in MKV and MP4, including E-AC-3 decoder delay in Matroska. Improved seek accuracy and reads from multitrack sources opened directly through ReaScript.
+
 ## v1.1.1 — 2026-11-21
 
 ### Русский

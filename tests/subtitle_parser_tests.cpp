@@ -100,6 +100,59 @@ int main() {
     catch(const std::exception&) {bad_srt_index=true;}
     require(bad_srt_index,"invalid indexed SRT cue does not silently leave a partial import");
 
+    const std::string vtt=
+      "\xef\xbb\xbf" "WEBVTT Example\r\nKind: captions\r\n\r\n"
+      "STYLE\r\n::cue { color: white }\r\n\r\n"
+      "REGION\r\nid:main\r\n\r\n"
+      "NOTE Timing inside this block is ignored\r\n00:00.000 --> 00:00.100\r\n\r\n"
+      "cue-1\r\n00:01.250 --> 00:03.500 line:85% align:start\r\n"
+      "<v.actor Анна &amp; Оля><i>Привет</i> <00:01.500>&lt;3&nbsp;&#x1F642;\r\n"
+      "<ruby>漢<rt>annotation</rt></ruby></v>\r\n\r\n"
+      "01:02:03.000 --> 01:02:03.000\r\n<v Bob.A>Zero length";
+    const auto webvtt=frzz::parse_subtitles(vtt,frzz::Format::vtt);
+    require(webvtt.size()==2 && webvtt[0].start==1.25 && webvtt[0].end==3.5 &&
+      webvtt[1].start==3723 && webvtt[1].end==3723,"WebVTT metadata blocks, settings, timestamps and zero duration");
+    require(webvtt[0].text=="[Анна & Оля] Привет <3\xc2\xa0\xf0\x9f\x99\x82\n漢" &&
+      webvtt[1].text=="[Bob.A] Zero length","WebVTT voice, formatting, ruby, text references and multiline body");
+    const auto named=frzz::parse_subtitles("WEBVTT\n\nSTYLE\n00:00.100 --> 00:01.000\nFirst\n\n"
+      "REGION\n00:01.000 --> 00:02.000\nSecond",frzz::Format::vtt);
+    require(named.size()==2 && named[0].text=="First" && named[1].text=="Second","WebVTT cue IDs matching block names");
+
+    const auto utf16=[](const std::u16string& text,bool little) {
+      std::string bytes=little?"\xff\xfe":"\xfe\xff";
+      for(const auto unit:text) {
+        const auto low=static_cast<char>(unit&255);
+        const auto high=static_cast<char>(unit>>8);
+        bytes+=little?low:high;
+        bytes+=little?high:low;
+      }
+      return bytes;
+    };
+    for(const bool little:{true,false}) {
+      const auto input=utf16(u"WEBVTT\n\n00:00.100 --> 00:02.200\n<v Роль>Строка \U0001f642",little);
+      const auto parsed=frzz::parse_subtitles(input,frzz::Format::vtt);
+      require(parsed.size()==1 && parsed[0].start==0.1 && parsed[0].end==2.2 &&
+        parsed[0].text=="[Роль] Строка \xf0\x9f\x99\x82","UTF-16LE/BE WebVTT and surrogate pair");
+    }
+    const auto wide_srt=frzz::parse_subtitles(utf16(u"1\n00:00:00,000 --> 00:00:02,000\nСубтитр",true),frzz::Format::srt);
+    require(wide_srt.size()==1 && wide_srt[0].text=="Субтитр","UTF-16 SubRip");
+    const auto ass_bytes=utf16(u"[Events]\rDialogue: 0,0:00:00.00,0:00:02.00,Default,Роль,0,0,0,,Текст",false);
+    for(const auto format:{frzz::Format::ass,frzz::Format::ssa}) {
+      const auto parsed=frzz::parse_subtitles(ass_bytes,format);
+      require(parsed.size()==1 && parsed[0].text=="[Роль] Текст","UTF-16 ASS/SSA");
+    }
+    for(const auto& malformed:{
+        std::string("\xff\xfeX",3), utf16(u"WEBVTT\n\n"+std::u16string(1,0xd800),true),
+        utf16(u"WEBVTT\n\n"+std::u16string(1,0xdc00),false),
+        std::string("WEBVTT\n\n00:02.000 --> 00:01.000\nReverse"),
+        std::string("WEBVTT\n\n00:00.001 --> 00:01.000\nGood\n\nbroken\n00:01.0 --> 00:02.0\nBad")}) {
+      bool rejected=false;
+      try {frzz::parse_subtitles(malformed,frzz::Format::vtt);}
+      catch(const std::exception&) {rejected=true;}
+      require(rejected,"malformed WebVTT or UTF-16 rejects the entire import");
+    }
+
+
     for(auto& ext:frzz::extensions_list) {
       std::string upper=ext.name;for(char& c:upper)if(c>='a' && c<='z')c-=('a'-'A');
       require(frzz::identify_format("C:\\folder.with.dots\\sample."+upper)==ext.format,"all advertised extensions are matched case-insensitively");
@@ -107,7 +160,7 @@ int main() {
     for(const char* path:{"x.wav","x.flac","x.mp3","x.mp4","x.mkv","x.ass.bak","x","C:\\a.ass\\x"})require(frzz::identify_format(path)==frzz::Format::unsupported,"unrelated formats not claimed");
     bool bad_utf8=false;try{frzz::parse_srt(std::string("\xff"));}catch(const std::exception&){bad_utf8=true;}
     require(bad_utf8,"invalid UTF-8 rejected");
-    std::cout << "PASS: ASS/SRT/SSA timing, mapping, Cyrillic, BOM, line endings, multiline, 10-line cap, malformed input and all 25 extension matches\n";
+    std::cout << "PASS: ASS/SSA/SRT/WebVTT, UTF-8 and UTF-16, cue timing and markup, malformed input, all 26 extensions\n";
     return 0;
   } catch(const std::exception& e) {std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}
 }
