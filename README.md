@@ -110,7 +110,7 @@ ASS/SSA учитывает секцию [Events] и порядок полей Fo
 
 SRT поддерживает миллисекунды, нумерованные и ненумерованные реплики, пустые строки внутри реплики и до 10 строк исходного текста на айтем. Оформительские теги вроде текста курсивом убираются.
 
-Конвертация в текстовые айтемы записывается в Undo отдельно от штатной вставки файла REAPER. Если до конвертации укоротить временный айтем, он сохраняет заданные границы.
+Импорт субтитров занимает одну запись в истории Undo REAPER. Одно действие Redo восстанавливает текстовые айтемы. Если до конвертации укоротить временный айтем, он сохраняет заданные границы.
 
 ### Совместимость
 
@@ -156,7 +156,7 @@ ctest --preset mac-universal-release
 
 Результат: `build-macos-universal/reaper_frzz_media_import.dylib` с архитектурами `x86_64` и `arm64`.
 
-Workflow `.github/workflows/ci.yml` собирает обе платформы при push и pull request. Тег `v1.1.0` создаёт GitHub Release с ZIP-архивами и SHA-256 checksums; суффикс, например `v1.1.0-rc.1`, создаёт prerelease.
+Workflow `.github/workflows/ci.yml` собирает обе платформы при push и pull request. Тег `v1.1.1` создаёт GitHub Release с ZIP-архивами и SHA-256 checksums; суффикс, например `v1.1.1-rc.1`, создаёт prerelease.
 
 ### Структура проекта
 
@@ -283,7 +283,7 @@ ASS/SSA honors the [Events] section and Format column order, preserves Actor nam
 
 SRT supports millisecond timing, numbered and unnumbered cues, blank lines within a cue, and up to 10 source text lines per item. Formatting tags such as italics are stripped.
 
-Undo records conversion to text items separately from REAPER’s native media insertion. If the placeholder is shortened before conversion, it retains its trimmed bounds.
+Subtitle import creates one entry in REAPER’s undo history. One redo restores the text items. If the placeholder is shortened before conversion, it retains its trimmed bounds.
 
 ### Compatibility
 
@@ -329,7 +329,7 @@ ctest --preset mac-universal-release
 
 Output: `build-macos-universal/reaper_frzz_media_import.dylib` with `x86_64` and `arm64` slices.
 
-The `.github/workflows/ci.yml` workflow builds both platforms on pushes and pull requests. A `v1.1.0` tag creates a GitHub Release with ZIP packages and SHA-256 checksums; a suffix such as `v1.1.0-rc.1` creates a prerelease.
+The `.github/workflows/ci.yml` workflow builds both platforms on pushes and pull requests. A `v1.1.1` tag creates a GitHub Release with ZIP packages and SHA-256 checksums; a suffix such as `v1.1.1-rc.1` creates a prerelease.
 
 ### Project layout
 

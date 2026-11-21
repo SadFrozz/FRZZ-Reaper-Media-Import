@@ -2,6 +2,18 @@
 
 [Русский](#русский) · [English](#english)
 
+## v1.1.1 — 2026-11-21
+
+### Русский
+
+- Импорт субтитров снова занимает одну запись в истории Undo. Одно действие Redo восстанавливает текст и тайминг даже без исходного файла субтитров.
+- Предпросмотр субтитров не изменяет историю Undo. Правый трим временного айтема сохраняется.
+
+### English
+
+- Subtitle import again creates one undo entry. A single redo restores the text and timing even if the original subtitle file is unavailable.
+- Subtitle preview leaves undo history alone. Right-trimmed placeholders retain their bounds.
+
 ## v1.1.0 — 2026-11-19
 
 ### Русский

@@ -4,10 +4,12 @@
 #include "media_metadata.h"
 #include "thd_ac3.h"
 #include "lineparse.h"
+#include "wdl_base64.h"
+#include <string_view>
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -30,22 +32,76 @@ void log(const char* fmt, ...) noexcept {
 #endif
 }
 static std::atomic<unsigned long long> next_id{1};
-struct Lifetime { PCM_source* source{}; unsigned long long id{}; bool armed=true; };
+struct Lifetime { PCM_source* source{}; unsigned long long id{}; bool armed=true; bool queued=false; };
 struct Pending { std::weak_ptr<Lifetime> life; MediaItem* item{}; MediaItem_Take* take{}; std::string item_guid; };
 static std::mutex queue_mutex;
 static std::vector<Pending> pending;
-class ImportUndo final {
-  ReaProject* project;
-public:
-  explicit ImportUndo(ReaProject* p):project(p) {
-    Undo_BeginBlock2(project);
-    log("subtitle undo opened project=%p",project);
+// The native undo point can contain the placeholder rather than the final items.
+static constexpr char subtitle_undo_chunk[]="<FRZZ_SUBTITLE_UNDO_CUES";
+static constexpr int max_subtitle_undo_bytes=32*1024*1024;
+
+template<class Value>
+static void append_undo_value(std::string& bytes,const Value& value) {
+  bytes.append(reinterpret_cast<const char*>(&value),sizeof(value));
+}
+
+template<class Value>
+static bool read_undo_value(std::string_view& bytes,Value& value) {
+  if(bytes.size()<sizeof(value))return false;
+  std::memcpy(&value,bytes.data(),sizeof(value));
+  bytes.remove_prefix(sizeof(value));
+  return true;
+}
+
+static void save_undo_cues(ProjectStateContext* ctx,const std::vector<Cue>& cues) {
+  std::string bytes;
+  for(const auto& cue:cues) {
+    constexpr auto header_bytes=2*sizeof(double)+sizeof(std::uint32_t);
+    if(bytes.size()+header_bytes+cue.text.size()>max_subtitle_undo_bytes)
+      throw std::runtime_error("Subtitle undo snapshot exceeds size limit");
+    append_undo_value(bytes,cue.start);
+    append_undo_value(bytes,cue.end);
+    append_undo_value(bytes,static_cast<std::uint32_t>(cue.text.size()));
+    bytes+=cue.text;
   }
-  ~ImportUndo() {
-    Undo_EndBlock2(project,"FRZZ: import subtitles",UNDO_STATE_ITEMS|UNDO_STATE_MISCCFG);
-    log("subtitle undo closed project=%p",project);
+  ctx->AddLine("%s",subtitle_undo_chunk);
+  cfg_encode_binary(ctx,bytes.data(),static_cast<int>(bytes.size()));
+  ctx->AddLine(">");
+}
+
+static std::vector<Cue> load_undo_cues(ProjectStateContext* ctx) {
+  std::string decoded;
+  char line[4096];
+  bool complete=false;
+  while(ctx->GetLine(line,sizeof(line))>=0) {
+    const char* start=line;
+    while(*start==' ' || *start=='\t')++start;
+    if(!std::strcmp(start,">")){complete=true;break;}
+    unsigned char block[3072];
+    const int size=wdl_base64decode(start,block,sizeof(block));
+    if(size<=0 || decoded.size()+static_cast<size_t>(size)>max_subtitle_undo_bytes)
+      throw std::runtime_error("Invalid subtitle undo snapshot");
+    decoded.append(reinterpret_cast<const char*>(block),size);
   }
-};
+  if(!complete || decoded.empty())throw std::runtime_error("Incomplete subtitle undo snapshot");
+
+  std::string_view bytes(decoded);
+  std::vector<Cue> restored;
+  while(!bytes.empty()) {
+    Cue cue;
+    std::uint32_t length;
+    if(!read_undo_value(bytes,cue.start) || !read_undo_value(bytes,cue.end) ||
+       !read_undo_value(bytes,length) || length>bytes.size() ||
+       !std::isfinite(cue.start) || !std::isfinite(cue.end) || cue.start<0 || cue.end<cue.start)
+      throw std::runtime_error("Invalid subtitle undo cue");
+    cue.text.assign(bytes.substr(0,length));
+    if(cue.text.find('\0')!=std::string::npos)throw std::runtime_error("Invalid subtitle undo text");
+    bytes.remove_prefix(length);
+    restored.push_back(std::move(cue));
+  }
+  return restored;
+}
+
 class SubtitleSource final : public PCM_source {
 public:
   const unsigned long long id=next_id++;
@@ -80,21 +136,46 @@ public:
   int PeaksBuild_Run() override {return 0;}
   void PeaksBuild_Finish() override {}
   void SaveState(ProjectStateContext* ctx) override {
-    State state;
-    state.AddLine("FILE %p~",file.c_str());
-    ctx->AddLine("%s",state.lines.front().c_str());
-    log("subtitle SaveState id=%llu flag=%d",id,ctx->GetTempFlag());
+    try {
+      State state;
+      state.AddLine("FILE %p~",file.c_str());
+      ctx->AddLine("%s",state.lines.front().c_str());
+      if((ctx->GetTempFlag()&0xffff)==PROJSTATECTX_UNDO_REDO &&
+         current_thread_id()==main_thread && life->armed && life->queued)
+        save_undo_cues(ctx,cues);
+      log("subtitle SaveState id=%llu flag=%d",id,ctx->GetTempFlag());
+    } catch(const std::exception& e) {log("subtitle SaveState error id=%llu %s",id,e.what());}
+      catch(...) {log("subtitle SaveState error id=%llu",id);}
   }
   int LoadState(const char*,ProjectStateContext* ctx) override {
-    // Undo/project restore must never schedule a fresh destructive conversion.
     life->armed=false;
-    log("subtitle LoadState id=%llu flag=%d",id,ctx->GetTempFlag());
-    char line[32768];
-    while(ctx->GetLine(line,sizeof(line))>=0) {
-      LineParser lp(false); if(lp.parse(line) || !lp.getnumtokens()) continue;
-      if(!strcmp(lp.gettoken_str(0),">")) return 0;
-      if(!strcmp(lp.gettoken_str(0),"FILE")) SetFileName(lp.gettoken_str(1));
-    }
+    life->queued=false;
+    available=false;
+    cues.clear();
+    try {
+      const bool is_undo=(ctx->GetTempFlag()&0xffff)==PROJSTATECTX_UNDO_REDO;
+      std::vector<Cue> restored;
+      std::string saved_file;
+      char line[32768];
+      while(ctx->GetLine(line,sizeof(line))>=0) {
+        LineParser lp(false); if(lp.parse(line) || !lp.getnumtokens())continue;
+        const char* token=lp.gettoken_str(0);
+        if(!strcmp(token,">")) {
+          if(is_undo && !restored.empty()) {
+            file=std::move(saved_file);
+            cues=std::move(restored);
+            available=life->armed=true;
+          } else if(!saved_file.empty())SetFileName(saved_file.c_str());
+          return 0;
+        }
+        if(!strcmp(token,"FILE"))saved_file=lp.gettoken_str(1);
+        if(!strcmp(token,subtitle_undo_chunk)) {
+          auto snapshot=load_undo_cues(ctx);
+          if(is_undo)restored=std::move(snapshot);
+        }
+      }
+    } catch(const std::exception& e) {log("subtitle LoadState error id=%llu %s",id,e.what());}
+      catch(...) {log("subtitle LoadState error id=%llu",id);}
     return -1;
   }
   int Extended(int call,void* p1,void* p2,void* p3) override {
@@ -113,6 +194,7 @@ public:
           });
           if(duplicate!=pending.end())return 1;
           pending.push_back({life,item,take,guid});
+          life->queued=true;
           log("conversion queued id=%llu guid=%s",id,guid);
         }
         return 1;
@@ -147,8 +229,6 @@ static std::string with_notes(MediaItem* item,const std::string& text) {
 static void process_pending() {
   std::vector<Pending> jobs;
   {std::lock_guard<std::mutex> lock(queue_mutex); jobs.swap(pending);}
-  // Keep all conversions for a project in one block, entirely within this main-thread callback.
-  std::map<ReaProject*,std::unique_ptr<ImportUndo>> undo_blocks;
   for(auto& p:jobs) {
     auto l=p.life.lock(); if(!l || !l->armed) continue;
     auto proj=owning_project(p.item,p.take,l->source);
@@ -173,8 +253,6 @@ static void process_pending() {
     l->armed=false;
     std::vector<MediaItem*> created;
     created.reserve(cues.size());
-    auto& undo=undo_blocks[proj];
-    if(!undo)undo=std::make_unique<ImportUndo>(proj);
     {
       RefreshLock refresh;
       try {
@@ -342,7 +420,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_H
 #ifdef FRZZ_ENABLE_LOGGING
     log_file.open(std::filesystem::u8path(GetResourcePath())/"frzz_media_import.log",std::ios::app);
 #endif
-    log("plugin loaded host=%s plugin=1.1.0 extensions=25 target=REAPER7.66+FFmpeg5+",GetAppVersion());
+    log("plugin loaded host=%s plugin=1.1.1 extensions=25 target=REAPER7.66+FFmpeg5+",GetAppVersion());
     reg=rec->Register;
     if(!reg("pcmsrc",&registry)) return 0;
     if(!reg("timer",reinterpret_cast<void*>(timer))) {reg("-pcmsrc",&registry);return 0;}

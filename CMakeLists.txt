@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FRZZReaperMediaImport VERSION 1.1.0 LANGUAGES CXX)
+project(FRZZReaperMediaImport VERSION 1.1.1 LANGUAGES CXX)
 
 if(WIN32)
   if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
