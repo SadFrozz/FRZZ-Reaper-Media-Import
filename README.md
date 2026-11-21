@@ -158,7 +158,7 @@ ctest --preset mac-universal-release
 
 Публикация тега версии, например `v1.1.1`, запускает сборку Windows и macOS и создаёт GitHub Release с ZIP-архивами и SHA-256. Тег с суффиксом, например `v1.1.1-rc.1`, создаёт prerelease.
 
-Для ручной сборки откройте **Actions → Build, test and release → Run workflow** и выберите ветку в списке GitHub. Пустое поле `commit` собирает вершину выбранной ветки. Для более раннего коммита скопируйте его короткий SHA из [истории коммитов](https://github.com/SadFrozz/FRZZ-Reaper-Media-Import/commits/) и введите от 7 символов. Если префикс неоднозначен, добавьте ещё символы. Архивы будут доступны в Artifacts запуска.
+Для ручной сборки откройте **Actions → Build, test and release → Run workflow**. Выберите ветку, затем коммит по короткому SHA и сообщению. Пункт `HEAD — latest commit in the selected branch` собирает вершину выбранной ветки. Список исторических коммитов задан в workflow и обновляется вместе с его файлом. Архивы будут доступны в Artifacts запуска.
 
 ### Структура проекта
 
@@ -333,7 +333,7 @@ Output: `build-macos-universal/reaper_frzz_media_import.dylib` with `x86_64` and
 
 Pushing a version tag such as `v1.1.1` builds Windows and macOS and publishes a GitHub Release with ZIP packages and SHA-256 checksums. A tag with a suffix such as `v1.1.1-rc.1` creates a prerelease.
 
-For a manual build, open **Actions → Build, test and release → Run workflow** and select a branch from GitHub’s dropdown. Leave `commit` blank to build the branch tip. For an earlier commit, copy its short SHA from the [commit history](https://github.com/SadFrozz/FRZZ-Reaper-Media-Import/commits/) and enter at least seven characters. If the prefix is ambiguous, add more characters. The packages appear under the run’s Artifacts.
+For a manual build, open **Actions → Build, test and release → Run workflow**. Pick a branch, then select a commit by its short SHA and message. `HEAD — latest commit in the selected branch` builds the branch tip. Historical choices are defined in the workflow file and updated with it. The packages appear under the run’s Artifacts.
 
 ### Project layout
 

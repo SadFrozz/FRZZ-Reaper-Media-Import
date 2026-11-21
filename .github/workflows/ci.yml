@@ -1,5 +1,5 @@
 name: Build, test and release
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('Build {0} at {1}', github.ref_name, inputs.commit || 'HEAD') || format('Release {0}', github.ref_name) }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Build {0} at {1}', github.ref_name, inputs.commit) || format('Release {0}', github.ref_name) }}
 
 on:
   push:
@@ -9,9 +9,19 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: Commit SHA (7–40 hex characters, blank builds the selected branch tip)
-        required: false
-        type: string
+        description: Commit to build
+        required: true
+        type: choice
+        default: 'HEAD — latest commit in the selected branch'
+        # GitHub Actions requires these choices to be declared in the workflow.
+        options:
+          - 'HEAD — latest commit in the selected branch'
+          - 'a76d981 — Select manual build branch and accept short commit SHAs'
+          - '62da7f6 — Build only release tags and explicitly selected commits'
+          - '03bd9c5 — Document subtitle undo regression in 1.1.0'
+          - '4901051 — Release 1.1.1'
+          - 'ea67472 — Release 1.1.0'
+          - 'dff6b64 — Initial release 1.0.0'
 
 permissions:
   contents: read
@@ -28,18 +38,12 @@ jobs:
     outputs:
       commit: ${{ steps.source.outputs.commit }}
     steps:
-      - name: Validate manual inputs
+      - name: Require a branch for manual builds
         if: github.event_name == 'workflow_dispatch'
         shell: bash
-        env:
-          BUILD_COMMIT: ${{ inputs.commit }}
         run: |
           if [[ "$GITHUB_REF_TYPE" != branch ]]; then
             echo "Choose a branch in the Run workflow menu." >&2
-            exit 1
-          fi
-          if [[ -n "$BUILD_COMMIT" && ! "$BUILD_COMMIT" =~ ^[[:xdigit:]]{7,40}$ ]]; then
-            echo "Enter 7–40 hexadecimal characters or leave the commit field blank." >&2
             exit 1
           fi
 
@@ -54,13 +58,18 @@ jobs:
         id: source
         shell: bash
         env:
-          BUILD_COMMIT: ${{ inputs.commit }}
+          BUILD_SELECTION: ${{ inputs.commit }}
         run: |
           commit="$(git rev-parse HEAD)"
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && -n "$BUILD_COMMIT" ]]; then
-            mapfile -t matches < <(git rev-parse --disambiguate="${BUILD_COMMIT,,}")
+          selected="${BUILD_SELECTION%% *}"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$selected" != HEAD ]]; then
+            if [[ ! "$selected" =~ ^[[:xdigit:]]{7,40}$ ]]; then
+              echo "Select a commit in the Run workflow menu." >&2
+              exit 1
+            fi
+            mapfile -t matches < <(git rev-parse --disambiguate="${selected,,}")
             if (( ${#matches[@]} != 1 )); then
-              echo "Commit SHA is unknown or ambiguous. Check it or enter more characters." >&2
+              echo "The commit SHA in the menu is unknown or ambiguous. Update the workflow option." >&2
               exit 1
             fi
             commit="${matches[0]}"
