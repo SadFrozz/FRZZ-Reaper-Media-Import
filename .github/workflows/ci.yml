@@ -1,5 +1,5 @@
 name: Build, test and release
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('Build {0} at {1}', inputs.branch, inputs.commit) || format('Release {0}', github.ref_name) }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Build {0} at {1}', github.ref_name, inputs.commit || 'HEAD') || format('Release {0}', github.ref_name) }}
 
 on:
   push:
@@ -8,21 +8,16 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
   workflow_dispatch:
     inputs:
-      branch:
-        description: Branch containing the commit
-        required: true
-        default: main
-        type: string
       commit:
-        description: Full commit SHA to build
-        required: true
+        description: Commit SHA (7–40 hex characters, blank builds the selected branch tip)
+        required: false
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.branch }}-${{ inputs.commit }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.commit }}
   cancel-in-progress: true
 
 jobs:
@@ -37,22 +32,21 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         shell: bash
         env:
-          BUILD_BRANCH: ${{ inputs.branch }}
           BUILD_COMMIT: ${{ inputs.commit }}
         run: |
-          if [[ -z "$BUILD_BRANCH" ]] || ! git check-ref-format "refs/heads/$BUILD_BRANCH"; then
-            echo "Enter a valid Git branch name." >&2
+          if [[ "$GITHUB_REF_TYPE" != branch ]]; then
+            echo "Choose a branch in the Run workflow menu." >&2
             exit 1
           fi
-          if [[ ! "$BUILD_COMMIT" =~ ^[[:xdigit:]]{40}$ ]]; then
-            echo "Enter a full 40-character commit SHA." >&2
+          if [[ -n "$BUILD_COMMIT" && ! "$BUILD_COMMIT" =~ ^[[:xdigit:]]{7,40}$ ]]; then
+            echo "Enter 7–40 hexadecimal characters or leave the commit field blank." >&2
             exit 1
           fi
 
       - name: Checkout branch or release commit
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/heads/{0}', inputs.branch) || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -63,9 +57,14 @@ jobs:
           BUILD_COMMIT: ${{ inputs.commit }}
         run: |
           commit="$(git rev-parse HEAD)"
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
-            commit="${BUILD_COMMIT,,}"
-            if [[ "$(git cat-file -t "$commit" 2>/dev/null)" != commit ]] ||
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && -n "$BUILD_COMMIT" ]]; then
+            mapfile -t matches < <(git rev-parse --disambiguate="${BUILD_COMMIT,,}")
+            if (( ${#matches[@]} != 1 )); then
+              echo "Commit SHA is unknown or ambiguous. Check it or enter more characters." >&2
+              exit 1
+            fi
+            commit="${matches[0]}"
+            if [[ "$(git cat-file -t "$commit")" != commit ]] ||
                ! git merge-base --is-ancestor "$commit" HEAD; then
               echo "The selected SHA must be a commit in the selected branch's history." >&2
               exit 1
