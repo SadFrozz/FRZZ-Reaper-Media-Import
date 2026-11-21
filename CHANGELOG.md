@@ -6,12 +6,12 @@
 
 ### Русский
 
-- Импорт субтитров снова занимает одну запись в истории Undo. Одно действие Redo восстанавливает текст и тайминг даже без исходного файла субтитров.
+- Исправлена регрессия версии 1.1.0, из-за которой импорт субтитров создавал две записи в истории Undo. Теперь на импорт приходится одна запись, а Redo восстанавливает текст и тайминг даже без исходного файла.
 - Предпросмотр субтитров не изменяет историю Undo. Правый трим временного айтема сохраняется.
 
 ### English
 
-- Subtitle import again creates one undo entry. A single redo restores the text and timing even if the original subtitle file is unavailable.
+- Fixed a regression introduced in 1.1.0 that created two undo entries when importing subtitles. Importing now creates one entry, and redo restores the text and timing even if the original file is unavailable.
 - Subtitle preview leaves undo history alone. Right-trimmed placeholders retain their bounds.
 
 ## v1.1.0 — 2026-11-19
