@@ -156,7 +156,9 @@ ctest --preset mac-universal-release
 
 Результат: `build-macos-universal/reaper_frzz_media_import.dylib` с архитектурами `x86_64` и `arm64`.
 
-Workflow `.github/workflows/ci.yml` собирает обе платформы при push и pull request. Тег `v1.1.1` создаёт GitHub Release с ZIP-архивами и SHA-256 checksums; суффикс, например `v1.1.1-rc.1`, создаёт prerelease.
+Публикация тега версии, например `v1.1.1`, запускает сборку Windows и macOS и создаёт GitHub Release с ZIP-архивами и SHA-256. Тег с суффиксом, например `v1.1.1-rc.1`, создаёт prerelease.
+
+Для ручной сборки откройте **Actions → Build, test and release → Run workflow**. Используйте workflow из основной ветки и заполните поля `branch` и `commit` полным SHA коммита из истории этой ветки. Архивы будут доступны в Artifacts запуска.
 
 ### Структура проекта
 
@@ -329,7 +331,9 @@ ctest --preset mac-universal-release
 
 Output: `build-macos-universal/reaper_frzz_media_import.dylib` with `x86_64` and `arm64` slices.
 
-The `.github/workflows/ci.yml` workflow builds both platforms on pushes and pull requests. A `v1.1.1` tag creates a GitHub Release with ZIP packages and SHA-256 checksums; a suffix such as `v1.1.1-rc.1` creates a prerelease.
+Pushing a version tag such as `v1.1.1` builds Windows and macOS and publishes a GitHub Release with ZIP packages and SHA-256 checksums. A tag with a suffix such as `v1.1.1-rc.1` creates a prerelease.
+
+For a manual build, open **Actions → Build, test and release → Run workflow**. Use the workflow from the default branch, then enter a `branch` and the full SHA of a `commit` in that branch's history. The packages are available under the run's Artifacts.
 
 ### Project layout
 
