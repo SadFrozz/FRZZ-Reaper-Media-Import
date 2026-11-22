@@ -187,17 +187,13 @@ ctest --preset mac-universal-release
 
 | Путь | Назначение |
 | --- | --- |
-| `src/plugin.cpp` | Регистрация расширений, интеграция с REAPER и импорт субтитров |
-| `src/container_audio.cpp`, `src/container_ffmpeg.cpp` | Выбор дорожки и прямое чтение аудиопотока из MKV и MP4 |
-| `src/media_metadata.cpp` | Метаданные raw-аудио и выбор загруженного FFmpeg ABI |
-| `src/ffmpeg_scan.cpp` | Адаптеры FFmpeg 5.x–9.x |
-| `src/thd_ac3.cpp` | Выбор FFmpeg ABI для `.thd+ac3` |
-| `src/thd_ac3_decoder.cpp` | Индексирование и потоковое декодирование TrueHD |
-| `src/subtitle_parser.cpp` | Парсер ASS, SSA, SRT и WebVTT |
-| `tests/` | Автоматические тесты парсера |
-| `.github/workflows/ci.yml` | CI и автоматическая публикация релизов |
+| `src/` | Код расширения — интеграция с REAPER, импорт аудио и субтитров, выбор дорожек в видео |
+| `tests/` | Автоматические тесты парсинга, аудио и пиков |
+| `external/` | Зафиксированные зависимости — REAPER SDK, WDL и заголовки FFmpeg |
+| `CMakeLists.txt` | Сборка расширения и тестов |
+| `.github/workflows/` | Сборка, тестирование и публикация релизов на GitHub |
 
-REAPER SDK, WDL и заголовки FFmpeg зафиксированы в `external/`. Сторонние компоненты сохраняют собственные лицензии и уведомления в своих каталогах.
+Сторонние компоненты сохраняют собственные лицензии и уведомления в своих каталогах.
 
 ### Лицензия
 
@@ -386,17 +382,13 @@ For a manual build, open **Actions → Build, test and release → Run workflow*
 
 | Path | Purpose |
 | --- | --- |
-| `src/plugin.cpp` | Extension registration, REAPER integration and subtitle import |
-| `src/container_audio.cpp`, `src/container_ffmpeg.cpp` | Track selection and in-place MKV/MP4 audio decoding |
-| `src/media_metadata.cpp` | Raw audio metadata and loaded FFmpeg ABI selection |
-| `src/ffmpeg_scan.cpp` | FFmpeg 5.x–9.x adapters |
-| `src/thd_ac3.cpp` | FFmpeg ABI selection for `.thd+ac3` |
-| `src/thd_ac3_decoder.cpp` | TrueHD indexing and streaming decoder |
-| `src/subtitle_parser.cpp` | ASS, SSA, SRT and WebVTT parser |
-| `tests/` | Automated parser tests |
-| `.github/workflows/ci.yml` | CI and automated release publishing |
+| `src/` | Extension code for REAPER integration, audio and subtitle import, and video audio track selection |
+| `tests/` | Automated tests for parsing, audio, and peaks |
+| `external/` | Pinned dependencies including the REAPER SDK, WDL, and FFmpeg headers |
+| `CMakeLists.txt` | Extension and test build configuration |
+| `.github/workflows/` | GitHub builds, tests, and release publishing |
 
-The REAPER SDK, WDL and FFmpeg headers are pinned under `external/`. Third-party components retain their own licenses and notices in those directories.
+Third-party components retain their own licenses and notices in their directories.
 
 ### License
 
