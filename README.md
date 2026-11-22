@@ -1,6 +1,6 @@
 # Reaper Media Import Extension
 
-Native Dolby, DTS and subtitle import for REAPER on Windows and macOS.
+Native Dolby/DTS/MLP audio and subtitle import, plus MKV/MP4 audio track selection, for REAPER on Windows and macOS.
 
 [Русский](#русский) · [English](#english)
 
@@ -20,9 +20,10 @@ Native Dolby, DTS and subtitle import for REAPER on Windows and macOS.
 
 ### Возможности
 
-Расширение Reaper Media Import добавляет в штатный импорт REAPER поддержку raw Dolby/DTS/MLP-аудио и субтитров ASS, SSA, SRT и WebVTT.
+Расширение Reaper Media Import добавляет в штатный импорт REAPER поддержку raw Dolby/DTS/MLP-аудио и субтитров ASS, SSA, SRT и WebVTT. При импорте многодорожечных MKV и MP4 можно выбрать аудиодорожку.
 
 - Нативная поддержка импорта файлов данных форматов любом удобным способом (как через штатное контекстное меню, так и через горячие клавиши или перетаскивание в окно Reaper).
+- [Выбор аудиодорожки при импорте MKV и MP4](#выбор-аудиодорожки-из-mkv-или-mp4) по языку, названию, кодеку и каналам.
 - Совместимо с Windows x64 и macOS Universal 2 с архитектурами Intel и Apple Silicon.
 - Работа с полными shared-сборками FFmpeg 5.x–9.x без запуска `ffmpeg` или `ffprobe`.
 - Коррекция длительности, частоты и числа каналов raw-аудио.
@@ -218,9 +219,10 @@ REAPER SDK, WDL и заголовки FFmpeg зафиксированы в `exte
 
 ### Features
 
-Reaper Media Import extends REAPER's native media import with raw Dolby/DTS/MLP audio and ASS, SSA, SRT and WebVTT subtitles.
+Reaper Media Import extends REAPER's native media import with raw Dolby/DTS/MLP audio and ASS, SSA, SRT and WebVTT subtitles. It also lets you select an audio track when importing multitrack MKV and MP4 files.
 
 - Native file import through REAPER's standard context menu, keyboard shortcuts, or drag and drop.
+- [Audio track selection when importing MKV and MP4](#selecting-an-audio-track-from-mkv-or-mp4) by language, title, codec, and channels.
 - Compatible with Windows x64 and macOS Universal 2 on Intel and Apple Silicon.
 - Full shared FFmpeg 5.x–9.x support without launching `ffmpeg` or `ffprobe`.
 - Corrected duration, sample rate and channel metadata for raw audio.
