@@ -1,5 +1,6 @@
 #include "platform.h"
 #include "container_native_video.h"
+#include "video_settings.h"
 #include "container_native_timing.h"
 #include "support.h"
 #if defined(_WIN32) || (defined(__APPLE__) && defined(__x86_64__))
@@ -9,6 +10,7 @@
 #endif
 #include <atomic>
 #include <array>
+#include <charconv>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -17,6 +19,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace frzz {
@@ -28,41 +31,69 @@ void* frzz_original_open{};
 void* frzz_original_peak_name{};
 void* frzz_original_channels{};
 }
-bool native_planar_bed_63(const void* codec_context,int source_channels,int main_channels) noexcept;
-#ifdef _WIN32
-bool native_planar_bed_62(const void* codec_context,int source_channels,int main_channels) noexcept;
-#endif
 #ifdef __APPLE__
 bool install_macos_video_hooks(void* peak_name,void* peak_ex,void* peak_legacy);
 bool install_macos_video_timing();
+bool install_macos_hardware_video();
+const NativeTimingHook* macos_video_timing() noexcept;
 #endif
 namespace {
-using PlanarBedCheck=bool (*)(const void*,int,int) noexcept;
 #ifdef _WIN32
 // Native FFmpeg decoder factory and PCM peak naming API on Windows x64.
 void* decoder_target{};
 void* channels_target{};
 HMODULE inspected_module{};
 
-struct KnownVideoPlugin {
-  std::string_view sha256;
+struct NativeFactory {
   std::uint32_t decoder;
   std::uint32_t channel_count;
-  PlanarBedCheck check_bed;
-  const NativeTimingHook& timing;
   unsigned format_open;
   unsigned open_return;
 };
-constexpr KnownVideoPlugin known_plugins[]{
-  {"a216e95294cb4ea7788ab486b09b1cf81b9271e4eaa3d34d353d69247e3fa4aa",0x7c0f4,0x7c4f8,native_planar_bed_62,native_timing_62,0x2406a8,0x7c2a2}, // 7.66 x64
-  {"d8526365a3c4b9714c2c49f52a7c1a17bd40e17efae58d763270f7a26f143c71",0x8452c,0x84930,native_planar_bed_62,native_timing_62,0x2517a8,0x846da}, // 7.77 x64
-  {"ebe822c5ee9dbb32394dc184a5d40c29fd4b6fc80b6f217ae9be9ad4cf33fddf",0x8fda4,0x901a8,native_planar_bed_63,native_timing_63,0x266888,0x8ff52}, // 7.85 x64
-  {"3012d1a65f9daa8d7cd390be1d892f71fa2907e066cfc9b00f70eb236c240913",0x8fda4,0x901a8,native_planar_bed_63,native_timing_63,0x266888,0x8ff52}, // 7.86 x64
+struct KnownVideoPlugin {
+  std::string_view sha256;
+  std::array<NativeFactory,5> factories;
 };
-PlanarBedCheck check_bed{};
+// Each image has a separate decoder factory and FFmpeg dispatch table for
+// each major. Entries are ordered by libavformat major, from 59 to 63.
+constexpr std::array<NativeFactory,5> factories_766{{
+  {0x5b69c,0x5baa9,0x23ffa8,0x5b84a},
+  {0x66104,0x66508,0x2401e8,0x662b2},
+  {0x70aec,0x70ef0,0x240448,0x70c9a},
+  {0x7c0f4,0x7c4f8,0x2406a8,0x7c2a2},
+  {},
+}};
+constexpr std::array<NativeFactory,5> factories_777{{
+  {0x61354,0x61761,0x251088,0x61502},
+  {0x6ce80,0x6d284,0x2512e8,0x6d02e},
+  {0x78a30,0x78e34,0x251548,0x78bde},
+  {0x8452c,0x84930,0x2517a8,0x846da},
+  {},
+}};
+constexpr std::array<NativeFactory,5> factories_785{{
+  {0x6058c,0x60999,0x265f08,0x6073a},
+  {0x6c0e8,0x6c4ec,0x266168,0x6c296},
+  {0x77c58,0x7805c,0x2663c8,0x77e06},
+  {0x83730,0x83b34,0x266628,0x838de},
+  {0x8fda4,0x901a8,0x266888,0x8ff52},
+}};
+constexpr std::array<NativeFactory,5> factories_786{{
+  {0x610cc,0x614d9,0x265f08,0x6127a},
+  {0x6cc4c,0x6d050,0x266168,0x6cdfa},
+  {0x787bc,0x78bc0,0x2663c8,0x7896a},
+  {0x84294,0x84698,0x266628,0x84442},
+  {0x8fda4,0x901a8,0x266888,0x8ff52},
+}};
+constexpr KnownVideoPlugin known_plugins[]{
+  {"a216e95294cb4ea7788ab486b09b1cf81b9271e4eaa3d34d353d69247e3fa4aa",factories_766}, // 7.66 x64
+  {"d8526365a3c4b9714c2c49f52a7c1a17bd40e17efae58d763270f7a26f143c71",factories_777}, // 7.77 x64
+  {"ebe822c5ee9dbb32394dc184a5d40c29fd4b6fc80b6f217ae9be9ad4cf33fddf",factories_785}, // 7.85 x64
+  {"3012d1a65f9daa8d7cd390be1d892f71fa2907e066cfc9b00f70eb236c240913",factories_786}, // 7.86 x64
+};
 const KnownVideoPlugin* active_video_plugin{};
-#else
-constexpr PlanarBedCheck check_bed=native_planar_bed_63;
+const NativeFactory* active_factory{};
+std::atomic<const NativeTimingHook*> active_timing{};
+bool hook_install_attempted{};
 #endif
 
 void* peak_target{};
@@ -152,46 +183,93 @@ std::string module_sha256(HMODULE module) {
   return result;
 }
 
-bool install_hooks() {
-  if(hooks_installed)return true;
-  if(!peak_target)return false;
+void inspect_video_plugin() {
   const auto module=GetModuleHandleW(L"reaper_video.dll");
-  if(!module || module==inspected_module)return false;
+  if(!module || module==inspected_module)return;
   inspected_module=module;
+  active_video_plugin=nullptr;
+  active_factory=nullptr;
+  active_timing=nullptr;
+  hook_install_attempted=false;
   decoder_target=nullptr;
   channels_target=nullptr;
   const auto hash=module_sha256(module);
   for(const auto& plugin:known_plugins) {
-    if(plugin.sha256!=hash)continue;
-    active_video_plugin=&plugin;
-    decoder_target=reinterpret_cast<unsigned char*>(module)+plugin.decoder;
-    constexpr unsigned char copy_count[]{0x89,0x59,0x44,0xc7,0x41,0x48,0,0,0,0};
-    auto* target=reinterpret_cast<unsigned char*>(module)+plugin.channel_count;
-    if(std::memcmp(target,copy_count,sizeof(copy_count))==0) {
-      channels_target=target;
-      check_bed=plugin.check_bed;
-    }
-    break;
+    if(plugin.sha256==hash) {active_video_plugin=&plugin;break;}
   }
-  if(!decoder_target || MH_Initialize()!=MH_OK)return false;
-  if(MH_CreateHook(decoder_target,reinterpret_cast<void*>(frzz_video_decoder_hook),&frzz_original_open)!=MH_OK ||
-     MH_CreateHook(peak_target,reinterpret_cast<void*>(frzz_video_peak_hook),&frzz_original_peak_name)!=MH_OK) {
-    MH_Uninitialize();
+}
+
+const NativeTimingHook* find_active_factory() {
+  if(!active_video_plugin)return nullptr;
+  if(const auto* timing=active_timing.load())return timing;
+  auto* image=reinterpret_cast<unsigned char*>(inspected_module);
+  for(const auto* timing:native_timing_adapters) {
+    const auto& factory=active_video_plugin->factories[timing->format_major-59];
+    if(!factory.format_open)continue;
+    const auto format=retain_loaded_module("avformat",timing->format_major);
+    if(!format)continue;
+    const auto* open=module_symbol(format,"avformat_open_input");
+    release_module(format);
+    if(!open || *reinterpret_cast<void**>(image+factory.format_open)!=open)continue;
+    active_factory=&factory;
+    decoder_target=image+factory.decoder;
+    constexpr unsigned char copy_count[]{0x89,0x59,0x44,0xc7,0x41,0x48,0,0,0,0};
+    auto* target=image+factory.channel_count;
+    if(std::memcmp(target,copy_count,sizeof(copy_count))==0)channels_target=target;
+    active_timing=timing;
+    return timing;
+  }
+  return nullptr;
+}
+
+bool pin_video_bridge() {
+  HMODULE self{};
+  HMODULE video{};
+  constexpr DWORD flags=GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN;
+  // Native sources may close after the extension's shutdown callback.
+  // Keep both the bridge and the FFmpeg dispatch table it restores mapped.
+  return inspected_module &&
+    GetModuleHandleExW(flags,reinterpret_cast<LPCWSTR>(inspected_module),&video) && video==inspected_module &&
+    GetModuleHandleExW(flags,reinterpret_cast<LPCWSTR>(&frzz_video_decoder_hook),&self);
+}
+
+bool install_hooks() {
+  if(hooks_installed)return true;
+  if(!peak_target)return false;
+  inspect_video_plugin();
+  if(hook_install_attempted)return false;
+  if(!find_active_factory())return false;
+  hook_install_attempted=true;
+  const auto initialized=MH_Initialize();
+  if(initialized!=MH_OK) {
+    log("native container track routing: %s",MH_StatusToString(initialized));
+    if(initialized==MH_ERROR_MEMORY_ALLOC)hook_install_attempted=false;
+    return false;
+  }
+  auto result=MH_CreateHook(decoder_target,reinterpret_cast<void*>(frzz_video_decoder_hook),&frzz_original_open);
+  const char* target="decoder";
+  if(result==MH_OK) {
+    target="peaks";
+    result=MH_CreateHook(peak_target,reinterpret_cast<void*>(frzz_video_peak_hook),&frzz_original_peak_name);
+  }
+  if(result!=MH_OK) {
+    log("native container track routing: %s hook: %s",target,MH_StatusToString(result));
+    if(MH_Uninitialize()==MH_OK && result==MH_ERROR_MEMORY_ALLOC)hook_install_attempted=false;
     return false;
   }
   if(channels_target && MH_CreateHook(channels_target,reinterpret_cast<void*>(frzz_video_channels_hook),
                                       &frzz_original_channels)!=MH_OK)channels_target=nullptr;
   // Threads may be returning through a trampoline as REAPER unloads extensions.
   // Keep the bridge and trampolines mapped until the process exits.
-  HMODULE self{};
-  if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
-       reinterpret_cast<LPCWSTR>(&frzz_video_decoder_hook),&self)) {
+  if(!pin_video_bridge()) {
+    log("native container track routing: could not retain video module");
     MH_Uninitialize();
     return false;
   }
   if(MH_QueueEnableHook(decoder_target)!=MH_OK || MH_QueueEnableHook(peak_target)!=MH_OK ||
      (channels_target && MH_QueueEnableHook(channels_target)!=MH_OK) ||
      MH_ApplyQueued()!=MH_OK) {
+    log("native container track routing: could not enable hooks");
     MH_QueueDisableHook(decoder_target);
     MH_QueueDisableHook(peak_target);
     if(channels_target)MH_QueueDisableHook(channels_target);
@@ -215,9 +293,9 @@ bool install_hooks() {
 #endif
 const NativeTimingHook* video_timing() noexcept {
 #ifdef _WIN32
-  return active_video_plugin?&active_video_plugin->timing:nullptr;
+  return active_timing.load();
 #else
-  return &native_timing_63;
+  return macos_video_timing();
 #endif
 }
 }
@@ -257,7 +335,7 @@ extern "C" int frzz_video_main_channels(const void* factory_frame,const void* co
   const auto* timing=video_timing();
   if(choice.source_channels==channels &&
      (choice.project_channels?(timing && timing->enable_channel_projection(codec_context,channels,choice.main_channels)):
-       (check_bed && check_bed(codec_context,channels,choice.main_channels)))) {
+       (timing && timing->planar_bed(codec_context,channels,choice.main_channels)))) {
     NativeVideoTrackCheck::observe(choice.alias);
     return choice.main_channels;
   }
@@ -308,8 +386,7 @@ std::string native_video_track_path(const std::string& file,int stream_index,int
     if(hooks_stop_requested || !install_hooks())return {};
 #ifdef _WIN32
     if(adjust_channels && !channels_target)return {};
-    if(timing_rate>0 && (!active_video_plugin ||
-      !active_video_plugin->timing.install({inspected_module,active_video_plugin->format_open,active_video_plugin->open_return,active_video_plugin->format_open+0x80})))
+    if(timing_rate>0 && !active_timing.load()->install({inspected_module,active_factory->format_open,active_factory->open_return}))
       return {};
 #else
     if(timing_rate>0 && !install_macos_video_timing())return {};
@@ -370,12 +447,63 @@ void verify_native_video_track(const std::string& alias,std::string_view decoder
   if(const auto found=tracks.find(alias);found!=tracks.end())found->second->verified_settings=decoder_settings;
 }
 
+#ifdef _WIN32
+bool windows_hardware_video_supported() noexcept {
+  const auto* version=GetAppVersion();
+  if(!version)return false;
+  const std::string_view text(version);
+  const auto* end=text.data()+text.size();
+  int major=0,minor=0;
+  const auto parsed=std::from_chars(text.data(),end,major);
+  if(parsed.ec!=std::errc{} || parsed.ptr==end || *parsed.ptr!='.')return false;
+  return std::from_chars(parsed.ptr+1,end,minor).ec==std::errc{} && (major>7 || (major==7 && minor>=66));
+}
+#endif
+
+void poll_native_hardware_video() {
+  static bool installed=false;
+  if(installed)return;
+#ifdef _WIN32
+  static const bool supported=windows_hardware_video_supported();
+  if(!supported)return;
+  if(!GetModuleHandleW(L"avcodec-59.dll") && !GetModuleHandleW(L"avcodec-60.dll") &&
+     !GetModuleHandleW(L"avcodec-61.dll") && !GetModuleHandleW(L"avcodec-62.dll") &&
+     !GetModuleHandleW(L"avcodec-63.dll"))return;
+#endif
+  std::lock_guard<std::mutex> lock(hooks_mutex);
+  if(hooks_stop_requested)return;
+#ifdef _WIN32
+  inspect_video_plugin();
+  const auto* timing=find_active_factory();
+  if(timing && pin_video_bridge())installed=timing->install({inspected_module,active_factory->format_open,0});
+  if(!installed && inspected_module && !active_video_plugin) {
+    static std::uint64_t next_dispatch_check{};
+    const auto now=monotonic_ms();
+    if(now<next_dispatch_check)return;
+    next_dispatch_check=now+100;
+    HMODULE video{};
+    if(!GetModuleHandleExW(0,L"reaper_video.dll",&video))return;
+    const std::unique_ptr<std::remove_pointer_t<HMODULE>,decltype(&release_module)> hold_video(video,release_module);
+    if(video!=inspected_module)return;
+    for(const auto* adapter:native_timing_adapters) {
+      if(!adapter->install({inspected_module,0,0}))continue;
+      log("native hardware video dispatch matched FFmpeg ABI %d",adapter->format_major);
+      installed=true;
+      break;
+    }
+  }
+#else
+  installed=install_macos_hardware_video();
+#endif
+  if(installed && video_settings().hevc_patches)log("native FFmpeg hardware HEVC packet retry enabled");
+}
+
 void shutdown_native_video_tracks() {
   std::lock_guard<std::mutex> lock(hooks_mutex);
   hooks_stop_requested=true;
+  for(const auto* timing:native_timing_adapters)timing->shutdown();
 #ifdef _WIN32
   if(!hooks_installed)return;
-  if(active_video_plugin)active_video_plugin->timing.shutdown();
   if(MH_QueueDisableHook(decoder_target)!=MH_OK || MH_QueueDisableHook(peak_target)!=MH_OK ||
      (channels_target && MH_QueueDisableHook(channels_target)!=MH_OK) ||
      MH_ApplyQueued()!=MH_OK) {
@@ -385,7 +513,6 @@ void shutdown_native_video_tracks() {
   hooks_installed=false;
 #else
   routing_enabled.store(false,std::memory_order_release);
-  native_timing_63.shutdown();
 #endif
 }
 }

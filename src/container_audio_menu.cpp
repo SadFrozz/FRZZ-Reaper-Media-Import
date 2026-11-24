@@ -1,4 +1,5 @@
 #include "api.h"
+#include "video_settings.h"
 #include "container_audio.h"
 #include "container_audio_dialog.h"
 #include "container_decoder.h"
@@ -207,6 +208,7 @@ void menu_hook(const char* name,void* handle,int flag) {
     const auto root=static_cast<HMENU>(handle);
     for(int i=GetMenuItemCount(root)-1;i>=0;--i)
       if(GetSubMenu(root,i) && menu_id(root,i)==submenu_id)DeleteMenu(root,static_cast<UINT>(i),MF_BYPOSITION);
+    if(!video_settings().multiple_audio_tracks)return;
     const int position=audio_track_position(root);
     if(position<0)return;
 
@@ -318,6 +320,7 @@ bool peak_command(int command,int flag) {
 }
 
 void change_track(MenuTarget chosen,int index) {
+  if(!video_settings().multiple_audio_tracks)return;
   try {
     if(!chosen.project || EnumProjects(-1,nullptr,0)!=chosen.project ||
        !ValidatePtr2(chosen.project,chosen.item,"MediaItem*") || !IsMediaItemSelected(chosen.item) ||
@@ -372,7 +375,15 @@ int choose_track_popup(const MenuTarget& target,int x,int y) {
 
 int peak_dispatch_id{};
 
+bool show_disabled_audio_action(int command) {
+  if(command!=change_track_id || video_settings().multiple_audio_tracks)return false;
+  MessageBox(GetMainHwnd(),"Multiple audio tracks are disabled. Enable them in Preferences > Plug-ins > Media Import and try again.",
+             change_track_action.desc,MB_OK|MB_ICONINFORMATION);
+  return true;
+}
+
 bool command_hook(int command,int flag) {
+  if(change_track_id && show_disabled_audio_action(command))return true;
   if(peak_dispatch_id && command==peak_dispatch_id) {
     try {
       dispatch_native_peak_requests();
@@ -389,6 +400,7 @@ bool command_hook(int command,int flag) {
   }
   const auto found=std::find(commands.begin(),commands.end(),command);
   if(found==commands.end())return false;
+  if(!video_settings().multiple_audio_tracks)return true;
   const auto slot=static_cast<std::size_t>(found-commands.begin());
   if(slot>=menu_choices.size())return true;
   const auto choice=menu_choices[slot];
@@ -478,6 +490,7 @@ bool from_toolbar() {
 
 bool action_hook(KbdSectionInfo* section,int command,int,int,int,HWND) {
   if(command!=change_track_id || (section && section->uniqueID!=0))return false;
+  if(show_disabled_audio_action(command))return true;
   static bool choosing=false;
   if(choosing)return true;
   choosing=true;

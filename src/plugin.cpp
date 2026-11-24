@@ -1,5 +1,6 @@
 #define REAPERAPI_IMPLEMENT
 #include "support.h"
+#include "video_settings.h"
 #include "container_audio.h"
 #include "container_native_video.h"
 #include "subtitle_parser.h"
@@ -7,6 +8,9 @@
 #include "thd_ac3.h"
 #include "lineparse.h"
 #include "wdl_base64.h"
+#ifdef FRZZ_ENABLE_WINDOWS_HDR
+#include "video_hdr_shader_cache.h"
+#endif
 #include <string_view>
 #include <atomic>
 #include <cstdint>
@@ -21,6 +25,7 @@ namespace frzz {
 static std::mutex log_mutex;
 static std::ofstream log_file;
 static ThreadId main_thread;
+
 void log(const char* fmt, ...) noexcept {
 #ifdef FRZZ_ENABLE_LOGGING
   try {
@@ -403,26 +408,32 @@ static const char* extensions(int i,const char** desc) {
 }
 static pcmsrc_register_t registry{create_type,create_file,extensions};
 static int (*reg)(const char*,void*);
+static bool preferences_registered{};
 static void timer() {
   static bool running=false;
   if(running || current_thread_id()!=main_thread) return;
   struct Running {bool& v; Running(bool& flag):v(flag){v=true;} ~Running(){v=false;}} guard(running);
   try {
+    poll_native_hardware_video();
     process_pending();
     poll_container_video();
     poll_container_peaks();
   } catch(const std::exception& e) {log("timer error=%s",e.what());} catch(...) {log("timer unknown error");}
 }
 }
-extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE,reaper_plugin_info_t* rec) {
+extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE instance,reaper_plugin_info_t* rec) {
   using namespace frzz;
   if(!rec) {
     if(reg) {
+      if(preferences_registered)unregister_video_preferences(reg);
       reg("-timer",reinterpret_cast<void*>(timer));
       cancel_container_peaks();
       unregister_container_track_menu();
       reg("-pcmsrc",&registry);
       shutdown_native_video_tracks();
+#ifdef FRZZ_ENABLE_WINDOWS_HDR
+      frzz_hdr_save_shader_cache();
+#endif
     }
     {std::lock_guard<std::mutex> lock(queue_mutex);pending.clear();}
     log("plugin unloaded"); return 0;
@@ -433,13 +444,19 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_H
 #ifdef FRZZ_ENABLE_LOGGING
     log_file.open(std::filesystem::u8path(GetResourcePath())/"frzz_media_import.log",std::ios::app);
 #endif
-    log("plugin loaded host=%s plugin=1.2.0 extensions=%zu target=REAPER7.66+FFmpeg5+",GetAppVersion(),extensions_list.size());
+    load_video_settings();
+    log("plugin loaded host=%s plugin=1.3.0 extensions=%zu target=REAPER7.66+FFmpeg5+",GetAppVersion(),extensions_list.size());
+    const auto video=video_settings();
+    log("video settings multi_audio=%d hdr_to_sdr=%d hevc_patches=%d hevc_seek_skip=%d",
+        video.multiple_audio_tracks,video.hdr_to_sdr,video.hevc_patches,video.hevc_seek_optimization());
     reg=rec->Register;
     set_native_video_peak_api(rec->GetFunc("GetPeakFileNameEx2"),rec->GetFunc("GetPeakFileNameEx"),rec->GetFunc("GetPeakFileName"));
     if(!reg("pcmsrc",&registry)) return 0;
     if(!reg("timer",reinterpret_cast<void*>(timer))) {reg("-pcmsrc",&registry);return 0;}
+    preferences_registered=register_video_preferences(instance,reg)!=0;
     register_container_track_menu(reg);
     reg("ext_name",const_cast<char*>("FRZZ native media import"));
+    prepare_video_hdr_shaders();
     return 1;
   } catch(...) {return 0;}
 }

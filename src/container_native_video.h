@@ -48,4 +48,13 @@ inline bool is_native_video_track_path(const char*){return false;}
 inline bool native_video_track_verified(const std::string&,std::string_view){return false;}
 inline void verify_native_video_track(const std::string&,std::string_view){}
 #endif
+
+#if defined(_WIN32) || (defined(__APPLE__) && defined(__x86_64__))
+void poll_native_hardware_video();
+#else
+inline void poll_native_hardware_video() {}
+#endif
+#ifdef _WIN32
+bool windows_hardware_video_supported() noexcept;
+#endif
 }

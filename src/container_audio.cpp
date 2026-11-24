@@ -1,4 +1,5 @@
 #include "api.h"
+#include "video_settings.h"
 #include "container_audio.h"
 #include "container_decoder.h"
 #include "container_audio_dialog.h"
@@ -108,7 +109,8 @@ static PCM_source* open_video(const char* path) {
   return PCM_Source_CreateFromFile(path);
 }
 
-static std::unique_ptr<PCM_source> load_video_without_audio(const char* first,State& state) {
+static std::unique_ptr<PCM_source> load_video(const char* first,State& state,bool ignore_audio,
+                                              bool restoring_on_main_thread=false) {
   // Native VIDEO stores its "Ignore audio" setting as AUDIO 0.
   int depth=0;
   state.lines.erase(std::remove_if(state.lines.begin(),state.lines.end(),[&depth](const auto& raw){
@@ -120,9 +122,14 @@ static std::unique_ptr<PCM_source> load_video_without_audio(const char* first,St
     else if(line.front()=='>')--depth;
     return depth==0 && (line.substr(0,6)=="AUDIO " || line.substr(0,6)=="AUDIO\t");
   }),state.lines.end());
-  state.lines.insert(state.lines.begin(),"AUDIO 0");
+  if(ignore_audio)state.lines.insert(state.lines.begin(),"AUDIO 0");
   std::unique_ptr<PCM_source> source(PCM_Source_CreateFromType("VIDEO"));
-  if(!source || source->LoadState(first,&state)<0)return {};
+  if(!source)return {};
+  // A restored project can display its first frame before the extension timer.
+  // Try once more after LoadState in case opening the source bound FFmpeg.
+  if(restoring_on_main_thread)poll_native_hardware_video();
+  if(source->LoadState(first,&state)<0)return {};
+  if(restoring_on_main_thread)poll_native_hardware_video();
   return source;
 }
 
@@ -130,14 +137,14 @@ static std::unique_ptr<PCM_source> open_video_without_audio(const char* path) {
   State state;
   state.AddLine("FILE %p~",path);
   state.lines.emplace_back(">");
-  return load_video_without_audio("<SOURCE VIDEO",state);
+  return load_video("<SOURCE VIDEO",state,true);
 }
 
-static std::unique_ptr<PCM_source> copy_video_without_audio(PCM_source& original,const char* filename=nullptr) {
+static std::unique_ptr<PCM_source> copy_video(PCM_source& original,const char* filename=nullptr,bool ignore_audio=true) {
   State state;
   state.SetTempFlag(PROJSTATECTX_UNDO_REDO);
   original.SaveState(&state);
-  if(!filename && std::find(state.lines.begin(),state.lines.end(),"AUDIO 0")!=state.lines.end())
+  if(ignore_audio && !filename && std::find(state.lines.begin(),state.lines.end(),"AUDIO 0")!=state.lines.end())
     return std::unique_ptr<PCM_source>(original.Duplicate());
   if(filename) {
     state.lines.erase(std::remove_if(state.lines.begin(),state.lines.end(),[](const auto& line){
@@ -147,7 +154,7 @@ static std::unique_ptr<PCM_source> copy_video_without_audio(PCM_source& original
     state.AddLine("FILE %p~",static_cast<const void*>(filename));
   }
   state.lines.emplace_back(">");
-  return load_video_without_audio("<SOURCE VIDEO",state);
+  return load_video("<SOURCE VIDEO",state,ignore_audio);
 }
 
 static std::unique_ptr<PCM_source> open_native_video_track(
@@ -272,7 +279,9 @@ class ContainerSource final:public PCM_source {
   std::unique_ptr<PCM_source> backend;
   std::unique_ptr<PCM_source> preview_video;
   std::unique_ptr<PCM_source> video;
+  std::unique_ptr<PCM_source> default_audio;
   std::atomic<PCM_source*> ready{};
+  std::atomic<PCM_source*> default_ready{};
   std::mutex peak_mutex;
   PCM_source* peak_builder{};
   std::shared_ptr<int> life=std::make_shared<int>(0);
@@ -316,6 +325,40 @@ class ContainerSource final:public PCM_source {
     ready.store(backend.get(),std::memory_order_release);
   }
 
+  void publish_default(std::unique_ptr<PCM_source> source) {
+    default_audio=std::move(source);
+    default_ready.store(default_audio.get(),std::memory_order_release);
+  }
+
+  PCM_source* stock_audio() const {
+    return video_settings().multiple_audio_tracks?nullptr:default_ready.load(std::memory_order_acquire);
+  }
+
+  PCM_source* playback_source() const {
+    if(auto* source=stock_audio())return source;
+    return ready.load(std::memory_order_acquire);
+  }
+
+  PCM_source* picture_source() const {
+    return uses_native_video()?ready.load(std::memory_order_acquire):video.get();
+  }
+
+  void update_default_file(const std::string& path,PCM_source* picture) {
+    if(default_audio) {
+      // Relink the existing stock source in place. REAPER can still hold the
+      // address returned to a playback worker or through GetSource().
+      const auto* current_path=default_audio->GetFileName();
+      if(!default_ready.load(std::memory_order_acquire) || !current_path || path!=current_path)
+        default_ready.store(default_audio->SetFileName(path.c_str())?default_audio.get():nullptr,
+                            std::memory_order_release);
+      return;
+    }
+    auto source=picture?copy_video(*picture,path.c_str(),false):
+      std::unique_ptr<PCM_source>(open_video(path.c_str()));
+    if(!source && picture)source.reset(open_video(path.c_str()));
+    publish_default(std::move(source));
+  }
+
   bool select(int index,bool with_video=false) {
     std::lock_guard<std::mutex> lock(peak_mutex);
     if(with_video && (!preview_video || !preview_video->IsAvailable() || std::strcmp(preview_video->GetType(),"VIDEO")!=0))return false;
@@ -323,6 +366,7 @@ class ContainerSource final:public PCM_source {
       if(auto source=open_native_video_track(*preview_video,file,info,index)) {
         stream_index=index;
         publish(std::move(source));
+        publish_default(std::move(preview_video));
         return true;
       }
     }
@@ -330,12 +374,13 @@ class ContainerSource final:public PCM_source {
       std::move(preview_video):make_backend(file,info,index);
     if(!source || !source->IsAvailable())return false;
     if(with_video) {
-      auto picture=copy_video_without_audio(*preview_video);
+      auto picture=copy_video(*preview_video);
       if(!picture || !picture->IsAvailable())return false;
       video=std::move(picture);
     }
     stream_index=index;
     publish(std::move(source));
+    if(index>=0)publish_default(std::move(preview_video));
     log("container selected stream=%d rate=%.0f channels=%d",stream_index,GetSampleRate(),GetNumChannels());
     return true;
   }
@@ -354,25 +399,29 @@ public:
     auto* source=ready.load(std::memory_order_acquire);
     return stream_index>=0 && source && std::strcmp(source->GetType(),"VIDEO")==0;
   }
+  bool uses_stock_audio() const {return stock_audio()!=nullptr;}
   bool open_track_from(PCM_source* previous,int index) {
     auto* original=std::strcmp(previous->GetType(),source_type)==0?previous->GetSource():previous;
     if(original && std::strcmp(original->GetType(),"VIDEO")==0) {
       if(auto source=open_native_video_track(*original,file,info,index)) {
         stream_index=index;
         publish(std::move(source));
+        update_default_file(file,original);
         return true;
       }
     }
-    return open_track(index) && attach_video(previous);
+    if(!open_track(index) || !attach_video(previous))return false;
+    update_default_file(file,video.get());
+    return true;
   }
   bool attach_video(PCM_source* previous) {
     auto* original=std::strcmp(previous->GetType(),source_type)==0?previous->GetSource():previous;
     if(!original || std::strcmp(original->GetType(),"VIDEO")!=0)return true;
-    video=copy_video_without_audio(*original,file.c_str());
+    video=copy_video(*original,file.c_str());
     return video && video->IsAvailable();
   }
   PeakFileStatus peak_status() const {
-    auto* source=ready.load(std::memory_order_acquire);
+    auto* source=playback_source();
     if(!source)return PeakFileStatus::missing;
     const char* key=source->GetFileName();
     if(!key || !*key)return PeakFileStatus::missing;
@@ -388,15 +437,26 @@ public:
   }
   bool has_video_audio() const {return uses_native_video() || (video && backend);}
   bool has_physical_peak_key() const {
-    auto* source=ready.load(std::memory_order_acquire);
+    auto* source=playback_source();
     return source && is_native_video_track_path(source->GetFileName());
   }
   bool automatic_peaks_enabled() const {return auto_peaks_enabled(project_load);}
   bool is_current_peak_request(std::uint64_t generation) const {return media_generation==generation;}
   void retry_peak_check_on_attach() {peaks_checked=false;}
   void request_track_change_peaks() {check_peaks_after_track_change=true;}
+  void refresh_audio_route(MediaItem* item,MediaItem_Take* take) {
+    if(stream_index<0 || !available)return;
+    ++media_generation;
+    peaks_checked=false;
+    request_track_change_peaks();
+    if(has_video_audio())Extended(PCM_SOURCE_EXT_SETITEMCONTEXT,item,take,nullptr);
+    else if(automatic_peaks_enabled())queue_audio_peaks(false);
+  }
   void queue_audio_peaks(bool rebuild) {
-    if(backend && (rebuild || peak_status()!=PeakFileStatus::complete))queue_peaks(backend.get(),rebuild);
+    auto* source=playback_source();
+    if(!source)return;
+    const auto status=rebuild?PeakFileStatus::incomplete:peak_status();
+    if(status!=PeakFileStatus::complete)queue_peaks(source,status==PeakFileStatus::incomplete);
   }
   void set_info(const char* path,ContainerAudio data) {
     if(file!=path) {
@@ -436,6 +496,12 @@ public:
         other->video.reset(video->Duplicate());
         if(!other->video)return nullptr;
       }
+      if(default_audio) {
+        std::unique_ptr<PCM_source> duplicate(default_audio->Duplicate());
+        if(!duplicate)return nullptr;
+        other->publish_default(std::move(duplicate));
+        if(!default_ready.load(std::memory_order_acquire))other->default_ready.store(nullptr);
+      }
       if(auto* src=ready.load(std::memory_order_acquire)) {
         std::unique_ptr<PCM_source> duplicate(src->Duplicate());
         if(!duplicate)return nullptr;
@@ -449,7 +515,7 @@ public:
     }catch(...){return nullptr;}
   }
   bool IsAvailable() override {
-    auto* src=ready.load();
+    auto* src=playback_source();
     return available && (src?src->IsAvailable():!file.empty()) && (!video || video->IsAvailable());
   }
   void SetAvailable(bool value) override {
@@ -458,16 +524,16 @@ public:
     available=value;
     auto* src=ready.load();
     if(src)src->SetAvailable(value);
+    if(default_audio)default_audio->SetAvailable(value);
     if(!value && preview_video && preview_video.get()!=src)preview_video->SetAvailable(false);
     if(video)video->SetAvailable(value);
   }
   const char* GetType() override {return source_type;}
   // REAPER uses the wrapped native source for video and this source for audio.
   PCM_source* GetSource() override {
-    if(uses_native_video())return backend.get();
     if(native_peak_sources && std::find(native_peak_sources->begin(),native_peak_sources->end(),this)!=native_peak_sources->end())
-      return backend.get();
-    return video.get();
+      return playback_source();
+    return picture_source();
   }
   const char* GetFileName() override {return file.c_str();}
   bool SetFileName(const char* name) override {
@@ -478,7 +544,8 @@ public:
       if(stream_index==-1) {
         std::unique_ptr<PCM_source> replacement(open_video(path.c_str()));
         if(!replacement || !replacement->IsAvailable())return false;
-        const bool choose=probe_container(path.c_str(),resource,next) && next.streams.size()>1 &&
+        const bool choose=video_settings().multiple_audio_tracks &&
+          probe_container(path.c_str(),resource,next) && next.streams.size()>1 &&
           (!next.has_video || std::strcmp(replacement->GetType(),"VIDEO")==0);
         std::lock_guard<std::mutex> lock(peak_mutex);
         finish_peaks_locked();
@@ -506,6 +573,7 @@ public:
             project_load=false;
             peaks_checked=false;
           }
+          update_default_file(path,native.get());
           video.reset();
           set_info(path.c_str(),std::move(next));
           publish(std::move(native));
@@ -517,7 +585,7 @@ public:
       if(!source || !source->IsAvailable())return false;
       std::unique_ptr<PCM_source> replacement;
       if(picture && (path!=file || !video)) {
-        replacement=path!=file?open_video_without_audio(path.c_str()):copy_video_without_audio(*picture,path.c_str());
+        replacement=path!=file?open_video_without_audio(path.c_str()):copy_video(*picture,path.c_str());
         if(!replacement || !replacement->IsAvailable())return false;
       }
       std::lock_guard<std::mutex> lock(peak_mutex);
@@ -528,6 +596,7 @@ public:
         project_load=false;
         peaks_checked=false;
       }
+      if(stream_index>=0)update_default_file(path,replacement?replacement.get():picture);
       set_info(path.c_str(),std::move(next));
       if(replacement)video=std::move(replacement);
       publish(std::move(source));
@@ -535,13 +604,19 @@ public:
       return true;
     } catch(...){return false;}
   }
-  int GetNumChannels() override {auto* src=ready.load();return src?src->GetNumChannels():1;}
-  double GetSampleRate() override {auto* src=ready.load();return src?src->GetSampleRate():0;}
-  double GetLength() override {auto* src=ready.load();return video?video->GetLength():(src?src->GetLength():std::max(0.001,info.duration));}
-  int GetBitsPerSample() override {auto* src=ready.load();return src?src->GetBitsPerSample():0;}
-  int PropertiesWindow(HWND parent) override {auto* src=ready.load();return src?src->PropertiesWindow(parent):0;}
+  int GetNumChannels() override {auto* src=playback_source();return src?src->GetNumChannels():1;}
+  double GetSampleRate() override {auto* src=playback_source();return src?src->GetSampleRate():0;}
+  double GetLength() override {
+    auto* src=video?video.get():playback_source();
+    return src?src->GetLength():std::max(0.001,info.duration);
+  }
+  int GetBitsPerSample() override {auto* src=playback_source();return src?src->GetBitsPerSample():0;}
+  int PropertiesWindow(HWND parent) override {
+    auto* src=ready.load(std::memory_order_acquire);
+    return src?src->PropertiesWindow(parent):0;
+  }
   void GetSamples(PCM_source_transfer_t* block) override {
-    if(auto* src=ready.load())src->GetSamples(block);
+    if(auto* src=playback_source())src->GetSamples(block);
     else block->samples_out=0;
   }
   void SaveState(ProjectStateContext* context) override {
@@ -550,7 +625,7 @@ public:
     const auto* filename=relative[0]?relative:file.c_str();
     context->AddLine("FILE %p~",static_cast<const void*>(filename));
     if(stream_index!=-1)context->AddLine("STREAM %d",stream_index);
-    if(auto* picture=uses_native_video()?backend.get():video.get()) {
+    if(auto* picture=picture_source()) {
       State state;
       state.SetTempFlag(context->GetTempFlag());
       picture->SaveState(&state);
@@ -602,7 +677,7 @@ public:
             else if(*row=='>')--depth;
           }
           if(depth)return -1;
-          video=load_video_without_audio(first.c_str(),state);
+          video=load_video(first.c_str(),state,true,current_thread_id()==main_thread);
           if(!video)return -1;
         }
       }
@@ -617,7 +692,8 @@ public:
         log("container context source=%p item=%p take=%p",this,p1,p2);
         const auto ext=extension(file.c_str());
         const auto mode=info.has_video?TrackDialogMode::import_video:TrackDialogMode::import_audio;
-        const int chosen=ext.size()>1 && native_multistream_enabled(ext.substr(1))?-2:choose_container_stream(info.streams,mode);
+        const int chosen=!video_settings().multiple_audio_tracks ||
+          (ext.size()>1 && native_multistream_enabled(ext.substr(1)))?-2:choose_container_stream(info.streams,mode);
         if(!select(chosen,chosen>=0 && info.has_video)) {
           if(chosen>=0)ShowMessageBox("The selected stream could not be opened by FFmpeg.","FRZZ audio track import",0);
           if(!select(-2))available=false;
@@ -643,13 +719,16 @@ public:
         video_queued=true;
       }catch(...){}
     }
-    if(video && call==PCM_SOURCE_EXT_SETITEMCONTEXT)video->Extended(call,p1,p2,p3);
-    if(auto* src=ready.load())return src->Extended(call,p1,p2,p3);
+    if(call==PCM_SOURCE_EXT_SETITEMCONTEXT) {
+      if(video)video->Extended(call,p1,p2,p3);
+      if(auto* stock=default_ready.load(std::memory_order_acquire))stock->Extended(call,p1,p2,p3);
+      if(auto* src=ready.load(std::memory_order_acquire))return src->Extended(call,p1,p2,p3);
+    } else if(auto* src=playback_source())return src->Extended(call,p1,p2,p3);
     return 0;
   }
   void GetPeakInfo(PCM_source_peaktransfer_t* block) override {
     block->peaks_out=0;
-    auto* source=ready.load(std::memory_order_acquire);
+    auto* source=playback_source();
     if(!source)return;
     source->GetPeakInfo(block);
     if(block->peaks_out || std::strcmp(source->GetType(),source_type)!=0)return;
@@ -671,12 +750,12 @@ public:
   void Peaks_Clear(bool erase) override {
     std::lock_guard<std::mutex> lock(peak_mutex);
     finish_peaks_locked();
-    if(auto* src=ready.load();src && !armed)src->Peaks_Clear(erase);
+    if(auto* src=playback_source();src && !armed)src->Peaks_Clear(erase);
   }
   int PeaksBuild_Begin() override {
     std::lock_guard<std::mutex> lock(peak_mutex);
     if(peak_builder)return 0;
-    auto* source=ready.load();
+    auto* source=playback_source();
     if(!source || armed)return 0;
     const int started=source->PeaksBuild_Begin();
     if(!started)return 0;
@@ -696,7 +775,13 @@ public:
 
 PCM_source* create_container_source(const char* path) {
   const auto ext=extension(path);
-  if(opening_video || choosing_track || (ext!=".mkv" && ext!=".mp4") || native_multistream_enabled(ext.substr(1)))return nullptr;
+  if(opening_video || choosing_track || (ext!=".mkv" && ext!=".mp4"))return nullptr;
+#ifdef _WIN32
+  // REAPER can bind FFmpeg as part of import before the next timer callback.
+  // Install the existing HDR callbacks before opening this media source.
+  poll_native_hardware_video();
+#endif
+  if(!video_settings().multiple_audio_tracks || native_multistream_enabled(ext.substr(1)))return nullptr;
   const auto resource=fs::u8path(GetResourcePath());
   ContainerAudio probe;
   if(!probe_container(path,resource,probe) || probe.streams.size()<2)return nullptr;
@@ -719,13 +804,29 @@ static PCM_source* section_media(PCM_source* source) {
   return nullptr;
 }
 
+void refresh_container_audio_routes() {
+  for(int p=0;auto* project=EnumProjects(p,nullptr,0);++p) {
+    const auto items=CountMediaItems(project);
+    for(int i=0;i<items;++i) {
+      auto* item=GetMediaItem(project,i);
+      for(int t=0;t<CountTakes(item);++t) {
+        auto* take=GetTake(item,t);
+        auto* source=section_media(GetMediaItemTake_Source(take));
+        if(auto* container=dynamic_cast<ContainerSource*>(source))container->refresh_audio_route(item,take);
+      }
+    }
+  }
+  UpdateArrange();
+}
+
 const char* container_track_file(PCM_source* source) {
   source=section_media(source);
   return source?source->GetFileName():nullptr;
 }
 
 static bool switching_supported(std::string_view ext) {
-  return (ext==".mkv" || ext==".mp4") && !native_multistream_enabled(ext.substr(1));
+  return video_settings().multiple_audio_tracks &&
+    (ext==".mkv" || ext==".mp4") && !native_multistream_enabled(ext.substr(1));
 }
 
 static bool read_track_options(PCM_source* source,const char* path,ContainerAudio& audio,int& current) {
@@ -829,8 +930,10 @@ bool has_video_container_audio(PCM_source* source) {
 
 PCM_source* container_peak_source_override(PCM_source* source,bool& physical_key) {
   auto* container=dynamic_cast<ContainerSource*>(section_media(source));
-  if(!container || !container->has_video_audio() || container->uses_native_video())return nullptr;
-  physical_key=container->has_physical_peak_key();
+  if(!container || !container->has_video_audio())return nullptr;
+  const bool stock=container->uses_stock_audio();
+  if(!stock && container->uses_native_video())return nullptr;
+  physical_key=stock || container->has_physical_peak_key();
   return container;
 }
 

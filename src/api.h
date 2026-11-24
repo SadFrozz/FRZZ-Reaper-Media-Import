@@ -3,6 +3,8 @@
 #define REAPERAPI_WANT_PCM_Source_CreateFromType
 #define REAPERAPI_WANT_PCM_Source_CreateFromSimple
 #define REAPERAPI_WANT_GetResourcePath
+#define REAPERAPI_WANT_GetExtState
+#define REAPERAPI_WANT_SetExtState
 #define REAPERAPI_WANT_GetAppVersion
 #define REAPERAPI_WANT_EnumProjects
 #define REAPERAPI_WANT_ValidatePtr2

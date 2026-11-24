@@ -1,5 +1,5 @@
 name: Build, test and release
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('Build {0} at {1}', github.ref_name, inputs.commit) || format('Release {0}', github.ref_name) }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Build {0} at {1}', github.ref_name, inputs.commit || 'HEAD') || format('Release {0}', github.ref_name) }}
 
 on:
   push:
@@ -9,19 +9,10 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: Commit to build
-        required: true
-        type: choice
-        default: 'HEAD — latest commit in the selected branch'
-        # GitHub Actions requires these choices to be declared in the workflow.
-        options:
-          - 'HEAD — latest commit in the selected branch'
-          - 'a76d981 — Select manual build branch and accept short commit SHAs'
-          - '62da7f6 — Build only release tags and explicitly selected commits'
-          - '03bd9c5 — Document subtitle undo regression in 1.1.0'
-          - '4901051 — Release 1.1.1'
-          - 'ea67472 — Release 1.1.0'
-          - 'dff6b64 — Initial release 1.0.0'
+        description: Optional short commit SHA (defaults to the selected branch's HEAD)
+        required: false
+        type: string
+        default: HEAD
 
 permissions:
   contents: read
@@ -61,15 +52,15 @@ jobs:
           BUILD_SELECTION: ${{ inputs.commit }}
         run: |
           commit="$(git rev-parse HEAD)"
-          selected="${BUILD_SELECTION%% *}"
+          selected="${BUILD_SELECTION:-HEAD}"
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$selected" != HEAD ]]; then
             if [[ ! "$selected" =~ ^[[:xdigit:]]{7,40}$ ]]; then
-              echo "Select a commit in the Run workflow menu." >&2
+              echo "Enter a commit SHA with 7 to 40 hexadecimal characters." >&2
               exit 1
             fi
             mapfile -t matches < <(git rev-parse --disambiguate="${selected,,}")
             if (( ${#matches[@]} != 1 )); then
-              echo "The commit SHA in the menu is unknown or ambiguous. Update the workflow option." >&2
+              echo "The commit SHA is unknown or ambiguous. Check the SHA or enter more characters." >&2
               exit 1
             fi
             commit="${matches[0]}"
@@ -188,6 +179,9 @@ jobs:
           codesign --force --sign - stage/reaper_frzz_media_import.dylib
           codesign --verify --strict stage/reaper_frzz_media_import.dylib
           cp README.md LICENSE stage/
+          if [[ -f external/LICENSE-libplacebo.txt ]]; then
+            cp external/LICENSE-libplacebo.txt stage/
+          fi
           (cd stage && shasum -a 256 reaper_frzz_media_import.dylib > SHA256SUMS.txt)
           ditto -c -k --sequesterRsrc stage packages/FRZZ-Reaper-Media-Import-${{ steps.version.outputs.value }}-macos-universal.zip
 

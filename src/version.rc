@@ -1,7 +1,19 @@
 #include <windows.h>
+#include "video_settings_resource.h"
+
+IDD_FRZZ_VIDEO_SETTINGS DIALOGEX 0, 0, 300, 80
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 8, "MS Shell Dlg"
+BEGIN
+  CONTROL "Enable multiple audio tracks", IDC_FRZZ_MULTI_AUDIO, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 8, 280, 12
+  CONTROL "Convert HDR and Dolby Vision to SDR", IDC_FRZZ_HDR_TO_SDR, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 25, 280, 12
+  CONTROL "Apply HEVC playback fixes", IDC_FRZZ_HEVC_PATCHES, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 42, 280, 12
+  CONTROL "Skip eligible frames when seeking HEVC", IDC_FRZZ_HEVC_SEEK_SKIP, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 22, 58, 268, 12
+END
+
 1 VERSIONINFO
-FILEVERSION 1,2,0,0
-PRODUCTVERSION 1,2,0,0
+FILEVERSION 1,3,0,0
+PRODUCTVERSION 1,3,0,0
 FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -12,9 +24,9 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "FRZZ REAPER native media import"
-      VALUE "FileVersion", "1.2.0"
+      VALUE "FileVersion", "1.3.0"
       VALUE "ProductName", "FRZZ REAPER Media Import"
-      VALUE "ProductVersion", "1.2.0"
+      VALUE "ProductVersion", "1.3.0"
       VALUE "OriginalFilename", "reaper_frzz_media_import.dll"
     END
   END

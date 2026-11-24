@@ -27,4 +27,5 @@ void cancel_container_peaks();
 void register_container_track_menu(int (*register_api)(const char*,void*));
 void unregister_container_track_menu();
 void poll_container_video();
+void refresh_container_audio_routes();
 }

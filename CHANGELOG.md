@@ -2,6 +2,28 @@
 
 [Русский](#русский) · [English](#english)
 
+## v1.3.0 — 2026-11-24
+
+### Русский
+
+- Добавлена страница настроек Media Import с переключателями выбора аудиодорожек, тонмаппинга, исправлений HEVC и пропуска кадров при перемотке.
+- Настройки применяются без перезапуска REAPER. При отключении мультиаудио новые файлы импортируются штатно, а существующие тейки воспроизводят дорожку по умолчанию. Повторное включение возвращает сохранённую дорожку.
+- Добавлен аппаратный тонмаппинг в SDR Rec.709 для HDR10, HDR10+ и Dolby Vision. Для Dolby Vision Profile 5 применяется RPU, для Profile 7 используется базовый слой с RPU, для Profile 8.1 используется базовый HDR10.
+- Код кривых тонмаппинга и обработки RPU из libplacebo встроен в расширение. Для сборки используются штатные шейдеры D3D11 и OpenGL.
+- Восстановленный видеоайтем с выбранной аудиодорожкой подключает обработку HDR до первой отрисовки при открытии проекта. На Windows обработка возобновляется и после штатной выгрузки в P010, если буфер выделен по запросу расширения.
+- На Windows компилируемые HDR-шейдеры кэшируются в `UserPlugins/Shaders`. После обновления драйвера или смены набора видеокарт кэш подготавливается заново.
+- Для аппаратного HEVC исправлена подача пакетов после `EAGAIN`. При перемотке расширение может подавлять вывод кадров до запрошенного участка и пропускать подходящие неопорные кадры. При рендере с оригинала сохраняются обработка HDR, исправление подачи пакетов и оптимизации перемотки.
+
+### English
+
+- Added a Media Import preferences page with controls for audio track selection, tone mapping, HEVC fixes, and frame skipping when seeking.
+- Settings take effect without restarting REAPER. Disabling multiple audio tracks restores standard import and makes existing takes play the default track. Re-enabling the feature restores the selected track saved in each take.
+- Added hardware tone mapping to SDR Rec.709 for HDR10, HDR10+, and Dolby Vision. Dolby Vision Profile 5 uses RPU metadata, Profile 7 uses the base layer with RPU, and Profile 8.1 uses the HDR10 base layer.
+- Integrated the libplacebo tone-mapping curves and RPU handling into the extension with native D3D11 and OpenGL shaders.
+- When reopening projects, video items with a selected audio stream attach HDR processing before their first displayed frame. On Windows, HDR processing can resume after a native P010 transfer into a buffer allocated at the extension’s request.
+- On Windows, compiled HDR shaders are cached in `UserPlugins/Shaders`. Driver or graphics-adapter changes trigger cache preparation again.
+- Fixed packet submission after `EAGAIN` in hardware HEVC decoding. Seeking can suppress output of earlier frames and skip eligible non-reference pictures. Rendering from the original keeps HDR processing, packet recovery, and seek optimizations active.
+
 ## v1.2.0 — 2026-11-22
 
 ### Русский

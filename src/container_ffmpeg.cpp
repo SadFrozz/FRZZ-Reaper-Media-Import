@@ -150,11 +150,18 @@ std::string channel_order(const std::vector<AVChannel>& speakers,ModuleHandle ut
   return order;
 }
 
-#if LIBAVCODEC_VERSION_MAJOR == 62 || LIBAVCODEC_VERSION_MAJOR == 63
 bool native_bed_sample_format(int format) {
   return format==AV_SAMPLE_FMT_S16P || format==AV_SAMPLE_FMT_S32P || format==AV_SAMPLE_FMT_FLTP;
 }
+
+template<class Audio>
+std::uint64_t native_channel_mask(const Audio& audio) {
+#if LIBAVCODEC_VERSION_MAJOR == 59
+  return audio.channel_layout;
+#else
+  return audio.ch_layout.order==AV_CHANNEL_ORDER_NATIVE?audio.ch_layout.u.mask:0;
 #endif
+}
 
 void select_main_channels(const AVCodecParameters* params,ModuleHandle util,ContainerStream& stream) {
   stream.source_channels=stream.channels=channels(params);
@@ -170,10 +177,8 @@ void select_main_channels(const AVCodecParameters* params,ModuleHandle util,Cont
   stream.channels=static_cast<int>(bed.size());
   if(stream.channels==stream.source_channels)stream.channel_map.clear();
   else stream.bed_speakers.assign(bed.begin(),bed.end());
-#if LIBAVCODEC_VERSION_MAJOR == 62 || LIBAVCODEC_VERSION_MAJOR == 63
   stream.native_planar_bed=!stream.channel_map.empty() && native_bed_sample_format(params->format) &&
-    params->ch_layout.order==AV_CHANNEL_ORDER_NATIVE;
-#endif
+    native_channel_mask(*params)!=0;
   stream.channel_order=channel_order(bed,util);
 }
 
@@ -600,21 +605,20 @@ ContainerDecoder* FRZZ_CONTAINER_OPEN(const char* path,std::shared_ptr<Container
   return decoder->open(path)?decoder.release():nullptr;
 }
 
-#if LIBAVCODEC_VERSION_MAJOR == 62 || LIBAVCODEC_VERSION_MAJOR == 63
 bool FRZZ_CONTAINER_PLANAR_BED(const void* codec_context,int source_channels,int main_channels) noexcept {
   if(!codec_context || main_channels<=0 || main_channels>8 || source_channels<=main_channels)return false;
   const auto& codec=*static_cast<const AVCodecContext*>(codec_context);
+  const auto mask=native_channel_mask(codec);
   if(codec.codec_type!=AVMEDIA_TYPE_AUDIO || !native_bed_sample_format(codec.sample_fmt) ||
-     codec.ch_layout.order!=AV_CHANNEL_ORDER_NATIVE || codec.ch_layout.nb_channels!=source_channels)return false;
+     !mask || channels(&codec)!=source_channels)return false;
   // REAPER can read a prefix of planar audio without changing FFmpeg's
   // decoder or touching the decoded frame. Packed audio needs its full stride.
   int channel=0;
   for(unsigned bit=0;bit<64;++bit) {
-    if(!(codec.ch_layout.u.mask&(std::uint64_t{1}<<bit)))continue;
+    if(!(mask&(std::uint64_t{1}<<bit)))continue;
     if(is_height(static_cast<AVChannel>(bit))!=(channel>=main_channels))return false;
     ++channel;
   }
   return channel==source_channels;
 }
-#endif
 }

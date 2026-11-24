@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FRZZReaperMediaImport VERSION 1.2.0 LANGUAGES CXX)
+project(FRZZReaperMediaImport VERSION 1.3.0 LANGUAGES CXX)
 
 if(WIN32)
   if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -38,7 +38,7 @@ foreach(HEADER_VERSION IN LISTS FFMPEG_HEADER_VERSIONS)
     FRZZ_CONTAINER_PROBE=probe_container_${FFMPEG_MAJOR}
     FRZZ_CONTAINER_OPEN=open_container_${FFMPEG_MAJOR}
     FRZZ_CONTAINER_PLANAR_BED=native_planar_bed_${FFMPEG_MAJOR})
-  if((WIN32 AND FFMPEG_MAJOR GREATER_EQUAL 62) OR (APPLE AND FFMPEG_MAJOR EQUAL 63))
+  if(WIN32 OR APPLE)
     target_sources(frzz_ff${FFMPEG_MAJOR} PRIVATE src/container_native_timing.cpp)
     target_compile_definitions(frzz_ff${FFMPEG_MAJOR} PRIVATE FRZZ_NATIVE_TIMING=native_timing_${FFMPEG_MAJOR})
   endif()
@@ -54,6 +54,7 @@ endforeach()
 set(FRZZ_PLUGIN_SOURCES
   src/container_audio.cpp
   src/container_audio_menu.cpp
+  src/video_settings.cpp
   src/container_peaks.cpp
   src/matroska_eac3.cpp
   src/container_decoder.cpp
@@ -73,6 +74,11 @@ target_include_directories(reaper_frzz_media_import SYSTEM PRIVATE
   external/reaper-sdk/sdk
   external/WDL/WDL)
 
+function(frzz_configure_hdr_adapters)
+  target_compile_definitions(frzz_ff59 PRIVATE FRZZ_HDR_LEGACY_METADATA)
+  target_compile_definitions(frzz_ff60 PRIVATE FRZZ_HDR_LEGACY_METADATA)
+endfunction()
+
 if(MSVC)
   enable_language(C)
   enable_language(ASM_MASM)
@@ -91,12 +97,54 @@ if(MSVC)
   target_include_directories(frzz_minhook PUBLIC "${minhook_SOURCE_DIR}/include")
   install(FILES "${minhook_SOURCE_DIR}/LICENSE.txt" DESTINATION "." RENAME "LICENSE-MINHOOK.txt")
   target_sources(reaper_frzz_media_import PRIVATE src/container_native_video.cpp src/container_native_video_win64.asm)
+  option(FRZZ_ENABLE_WINDOWS_HDR "Build the D3D11 HDR renderer" ON)
+  option(FRZZ_ENABLE_WINDOWS_QSV "Enable experimental Intel oneVPL surfaces for the Windows HDR renderer" OFF)
+  if(FRZZ_ENABLE_WINDOWS_HDR)
+    frzz_configure_hdr_adapters()
+    if(FRZZ_ENABLE_WINDOWS_QSV)
+      find_path(FRZZ_ONEVPL_INCLUDE_DIR vpl/mfxstructures.h REQUIRED)
+    endif()
+    foreach(adapter IN LISTS FRZZ_FFMPEG_ADAPTERS)
+      target_compile_definitions(${adapter} PRIVATE FRZZ_WINDOWS_HDR=windows_hdr_${adapter} _CRT_SECURE_NO_WARNINGS)
+      target_sources(${adapter} PRIVATE src/video_hdr_windows.cpp src/video_hdr_d3d11.c src/video_hdr_dxva2.cpp)
+      target_include_directories(${adapter} SYSTEM PRIVATE
+        external/reaper-sdk/sdk external/WDL/WDL)
+      target_compile_features(${adapter} PRIVATE c_std_11)
+      if(FRZZ_ENABLE_WINDOWS_QSV)
+        target_include_directories(${adapter} SYSTEM PRIVATE "${FRZZ_ONEVPL_INCLUDE_DIR}")
+        target_compile_definitions(${adapter} PRIVATE FRZZ_WINDOWS_QSV)
+      endif()
+    endforeach()
+    target_sources(reaper_frzz_media_import PRIVATE src/video_hdr_shader_cache.cpp src/video_hdr_color.c)
+    target_compile_definitions(reaper_frzz_media_import PRIVATE FRZZ_ENABLE_WINDOWS_HDR)
+    target_compile_features(reaper_frzz_media_import PRIVATE c_std_11)
+    target_link_libraries(reaper_frzz_media_import PRIVATE d3d11 dxgi dxguid d3dcompiler)
+  endif()
   target_link_libraries(reaper_frzz_media_import PRIVATE comctl32 advapi32 frzz_minhook)
   target_compile_definitions(reaper_frzz_media_import PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
   target_compile_options(reaper_frzz_media_import PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4;/utf-8;/EHsc>)
 elseif(APPLE)
   enable_language(OBJCXX ASM)
+  option(FRZZ_ENABLE_MACOS_HDR "Build the Intel Mac VideoToolbox HDR renderer" ON)
+  if(FRZZ_ENABLE_MACOS_HDR)
+    enable_language(C)
+    frzz_configure_hdr_adapters()
+    find_library(FRZZ_COREVIDEO CoreVideo REQUIRED)
+    find_library(FRZZ_IOSURFACE IOSurface REQUIRED)
+    find_library(FRZZ_OPENGL OpenGL REQUIRED)
+    foreach(adapter IN LISTS FRZZ_FFMPEG_ADAPTERS)
+      target_compile_definitions(${adapter} PRIVATE FRZZ_MACOS_HDR=macos_hdr_${adapter})
+      set_target_properties(${adapter} PROPERTIES OBJCXX_STANDARD 17 OBJCXX_STANDARD_REQUIRED YES C_STANDARD 11)
+      target_sources(${adapter} PRIVATE src/video_hdr_macos.mm src/video_hdr_placebo.c)
+      target_include_directories(${adapter} SYSTEM PRIVATE
+        external/reaper-sdk/sdk external/WDL/WDL "${CMAKE_BINARY_DIR}/compat")
+    endforeach()
+    target_sources(reaper_frzz_media_import PRIVATE src/video_hdr_color.c)
+    target_link_libraries(reaper_frzz_media_import PRIVATE
+      "${FRZZ_COREVIDEO}" "${FRZZ_IOSURFACE}" "${FRZZ_OPENGL}")
+    target_compile_definitions(reaper_frzz_media_import PRIVATE FRZZ_ENABLE_MACOS_HDR)
+  endif()
   target_sources(reaper_frzz_media_import PRIVATE
     src/container_native_video.cpp src/container_native_video_macos.cpp src/container_native_video_macos.S)
   set_target_properties(reaper_frzz_media_import PROPERTIES OBJCXX_STANDARD 17 OBJCXX_STANDARD_REQUIRED YES)
@@ -120,6 +168,9 @@ set_target_properties(reaper_frzz_media_import PROPERTIES PREFIX "")
 install(TARGETS reaper_frzz_media_import
   RUNTIME DESTINATION .
   LIBRARY DESTINATION .)
+if(FRZZ_ENABLE_WINDOWS_HDR OR FRZZ_ENABLE_MACOS_HDR)
+  install(FILES external/LICENSE-libplacebo.txt DESTINATION .)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
@@ -163,4 +214,19 @@ if(BUILD_TESTING)
     target_compile_options(matroska_eac3_tests PRIVATE -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME matroska_eac3 COMMAND matroska_eac3_tests)
+
+  add_executable(hevc_preroll_tests tests/hevc_preroll_tests.cpp)
+  target_include_directories(hevc_preroll_tests PRIVATE src)
+  add_test(NAME hevc_preroll COMMAND hevc_preroll_tests)
+
+  if(FRZZ_ENABLE_WINDOWS_HDR OR FRZZ_ENABLE_MACOS_HDR)
+    add_executable(video_hdr_color_tests tests/video_hdr_color_tests.c src/video_hdr_color.c)
+    target_compile_features(video_hdr_color_tests PRIVATE c_std_11)
+    target_include_directories(video_hdr_color_tests PRIVATE src)
+    target_include_directories(video_hdr_color_tests SYSTEM PRIVATE external/ffmpeg-headers/9.0.2)
+    if(WIN32)
+      target_link_libraries(video_hdr_color_tests PRIVATE d3dcompiler)
+    endif()
+    add_test(NAME video_hdr_color COMMAND video_hdr_color_tests)
+  endif()
 endif()
